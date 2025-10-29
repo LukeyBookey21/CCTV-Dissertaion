@@ -1,0 +1,9 @@
+# Development tools
+black
+flake8
+pytest
+pre-commit
+mypy
+
+# markdown linter (optional via npm for CLI)
+# Install markdownlint-cli with: npm i -g markdownlint-cli

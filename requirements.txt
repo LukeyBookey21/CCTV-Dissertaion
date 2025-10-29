@@ -1,0 +1,15 @@
+# Core runtime dependencies
+numpy
+opencv-python-headless
+ffmpeg-python
+ultralytics
+torch
+torchvision
+
+# Utilities
+pyyaml
+python-dateutil
+
+# For packaging / CLI
+click
+
