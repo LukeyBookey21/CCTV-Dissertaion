@@ -88,7 +88,7 @@ streamlit run ui/streamlit_app.py
 Use the sidebar to:
 
 - Upload a new video (it is saved under `data/uploads/`, ingested, detected, and optionally auto-stored/tracked in SQLite).
-- Select any detection JSON, view summaries, and run class/time/confidence queries against the database.
+- Select any detection JSON, view summaries, scrub through the annotated video with frame-by-frame overlays, and run class/time/confidence queries against the database.
 
 ### REST API
 

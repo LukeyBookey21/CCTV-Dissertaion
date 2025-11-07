@@ -132,8 +132,8 @@ def main() -> None:
     st.session_state["selected_report_path"] = str(selected_file.resolve())
 
     summary = cached_summary(str(selected_file))
-    display_summary(summary)
     report_data = load_detection_report(str(selected_file))
+    display_summary(summary, report_data)
     display_visual_preview(report_data)
 
     st.divider()
@@ -190,7 +190,7 @@ def main() -> None:
         render_export_controls(st.session_state.get("last_query"))
 
 
-def display_summary(summary: dict) -> None:
+def display_summary(summary: dict, report: Optional[dict] = None) -> None:
     st.subheader("Detection Summary")
     metrics = st.columns(4)
     metrics[0].metric("Frames analyzed", summary["frames_in_report"])
@@ -203,6 +203,11 @@ def display_summary(summary: dict) -> None:
         else "N/A"
     )
     metrics[3].metric("Time span", span)
+
+    info_cols = st.columns(3)
+    info_cols[0].write(f"**Source**: {summary.get('source_path')}")
+    info_cols[1].write(f"**SHA-256**: {summary.get('sha256')}")
+    info_cols[2].write(f"**Model**: {summary.get('model_path')}")
 
     class_stats = summary.get("class_stats", {})
     if class_stats:
@@ -220,6 +225,9 @@ def display_summary(summary: dict) -> None:
         st.dataframe(df, hide_index=True)
     else:
         st.info("No detections found in this report.")
+    if report and report.get("metadata"):
+        with st.expander("Metadata & Source Details"):
+            st.json(report["metadata"])
 
 
 def display_detections(data: List[dict]) -> None:
@@ -265,37 +273,81 @@ def display_visual_preview(report: dict) -> None:
     if not frames:
         st.info("No detections to visualize.")
         return
+    metadata = report.get("metadata") or {}
+    fps = metadata.get("frame_rate") or 25.0
     frame_indices = [frame.get("frame_index", 0) for frame in frames]
-    min_frame = min(frame_indices)
-    max_frame = max(frame_indices)
-    if min_frame == max_frame:
-        selected_frame = min_frame
-    else:
-        selected_frame = st.slider(
-            "Frame index",
-            min_value=min_frame,
-            max_value=max_frame,
-            value=frame_indices[0],
-            step=1,
-        )
-    frame_data = next(
-        (frame for frame in frames if frame.get("frame_index") == selected_frame),
-        frames[0],
+    last_ts = frames[-1].get("timestamp_seconds")
+    max_duration = (
+        metadata.get("duration_seconds")
+        or last_ts
+        or max(frame_indices or [0]) / max(fps, 1e-6)
     )
+
+    slider_key = f"timeline_{report.get('sha256')}"
+    pending_key = f"{slider_key}_pending"
+    default_ts = st.session_state.get(slider_key, 0.0)
+    if pending_key in st.session_state:
+        default_ts = st.session_state.pop(pending_key)
+    timestamp = st.slider(
+        "Frame scrubber (seconds)",
+        min_value=0.0,
+        max_value=max(max_duration, 0.1),
+        value=default_ts,
+        step=max(1.0 / fps, 0.05),
+        key=slider_key,
+    )
+    def frame_time(frame: dict) -> float:
+        if frame.get("timestamp_seconds") is not None:
+            return float(frame["timestamp_seconds"])
+        idx = frame.get("frame_index") or 0
+        return idx / max(fps, 1e-6)
+
+    frame_data = min(frames, key=lambda f: abs(frame_time(f) - timestamp))
+
+    frame_placeholder = st.empty()
+    detections_placeholder = st.empty()
+    show_video_key = f"{report.get('sha256')}_show_video"
+    if show_video_key not in st.session_state:
+        st.session_state[show_video_key] = False
+
+    if st.session_state[show_video_key]:
+        frame_placeholder.video(str(video_path))
+        if st.button("⏹️ Stop Video", key=f"stop_{report.get('sha256')}"):
+            st.session_state[show_video_key] = False
+            st.experimental_rerun()
+        detections_placeholder.info("Video playing. Stop to resume frame inspection.")
+        return
+
     try:
         frame = read_frame(video_path, frame_data.get("frame_index", 0))
         image = overlay_detections_on_frame(frame, frame_data["detections"])
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        timestamp = frame_data.get("timestamp_seconds") or 0.0
-        st.image(
+        ts = frame_data.get("timestamp_seconds") or 0.0
+        frame_placeholder.image(
             image,
-            caption=f"Frame {frame_data.get('frame_index')} @ {timestamp:.2f}s",
-            use_column_width=True,
+            caption=f"Frame {frame_data.get('frame_index')} @ {ts:.2f}s",
+            width="stretch",
         )
     except Exception as exc:
         st.error(f"Unable to render frame: {exc}")
-    st.dataframe(pd.DataFrame(frame_data["detections"]), hide_index=True)
-    display_video_preview(report)
+    detections_placeholder.dataframe(
+        pd.DataFrame(frame_data["detections"]), hide_index=True
+    )
+
+    control_cols = st.columns([1, 1, 1])
+    step = max(1.0 / fps, 0.05)
+
+    if control_cols[0].button("⏪ Step Back", key=f"back_{report.get('sha256')}"):
+        st.session_state[show_video_key] = False
+        st.session_state[pending_key] = max(timestamp - step, 0.0)
+        st.experimental_rerun()
+    if control_cols[1].button("▶️ Play Video", key=f"play_{report.get('sha256')}"):
+        st.session_state[show_video_key] = True
+        st.experimental_rerun()
+    if control_cols[2].button("⏩ Step Forward", key=f"forward_{report.get('sha256')}"):
+        st.session_state[show_video_key] = False
+        st.session_state[pending_key] = min(timestamp + step, max_duration)
+        st.experimental_rerun()
 
 
 def detection_draw_payload(detections: List[dict]) -> Tuple[Tuple[float, ...], ...]:

@@ -9,6 +9,11 @@ venv/
 *.pt
 *.pth
 models/
+data/uploads/
+data/previews/
+data/analysis.db
+data/manifests/ingest_manifest.json
+data/detections/*.json
 
 # VS Code
 .vscode/
@@ -24,4 +29,3 @@ models/
 .cache/
 # Logs
 *.log
-
