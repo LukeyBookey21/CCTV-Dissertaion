@@ -5,11 +5,13 @@ ffmpeg-python
 ultralytics
 torch
 torchvision
+fastapi
+uvicorn[standard]
 
 # Utilities
 pyyaml
 python-dateutil
+streamlit
 
 # For packaging / CLI
 click
-

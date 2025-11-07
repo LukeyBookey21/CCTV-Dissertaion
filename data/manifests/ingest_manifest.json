@@ -1,0 +1,53 @@
+[
+  {
+    "source_path": "/tmp/demo_ingest.avi",
+    "sha256": "2fb8b2392db12048e2077033299c225c5918b976a55cc6a4d91d102918a6fd34",
+    "ingested_at": "2025-11-07T00:23:11.885847+00:00",
+    "metadata": {
+      "metadata_backend": "opencv",
+      "duration_seconds": 1.0,
+      "size_bytes": 8188,
+      "codec": null,
+      "bit_rate": null,
+      "width": 64,
+      "height": 64,
+      "frame_rate": 10.0,
+      "frame_count": 10,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/Sample_videos/5977704-hd_1366_586_30fps.mp4",
+    "sha256": "69112fe6fd0b7ab93a9c0896aa87af7f503a0d4ff186abd0213d82ddbbdc5855",
+    "ingested_at": "2025-11-07T00:45:28.648485+00:00",
+    "metadata": {
+      "metadata_backend": "opencv",
+      "duration_seconds": 20.820800000000002,
+      "size_bytes": 7828761,
+      "codec": null,
+      "bit_rate": null,
+      "width": 1366,
+      "height": 586,
+      "frame_rate": 29.97002997002997,
+      "frame_count": 624,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/2980656-uhd_3840_2160_30fps.mp4",
+    "sha256": "bdcb1c21acdc104848a33322010fbebdde8c4a2307afb366e4f765a4b3e6f46f",
+    "ingested_at": "2025-11-07T01:39:19.661788+00:00",
+    "metadata": {
+      "metadata_backend": "opencv",
+      "duration_seconds": 20.9209,
+      "size_bytes": 66087422,
+      "codec": null,
+      "bit_rate": null,
+      "width": 3840,
+      "height": 2160,
+      "frame_rate": 29.97002997002997,
+      "frame_count": 627,
+      "creation_time": null
+    }
+  }
+]

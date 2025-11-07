@@ -66,6 +66,53 @@ Video frequently includes identifiable people. Use public/consented footage. App
 
 ---
 
+## Development Kick-off Tasks
+
+1. **Video ingestion scaffold** – run `python -m cctv_dissertation.app ingest path/to/video.mp4` to hash a file, extract baseline metadata, and append it to `data/manifests/ingest_manifest.json`. This establishes the chain-of-custody layer the rest of the system will rely on.
+2. **Manifest inspection** – the manifest grows as JSON list entries; open it in any editor to review stored hashes, timestamps, and metadata backends (ffprobe when available, OpenCV fallback otherwise).
+3. **Hash-only utility** – `python -m cctv_dissertation.app hash some_file.bin` remains available for quick integrity checks outside the ingestion flow.
+4. **YOLOv8 detections** – `python -m cctv_dissertation.app detect path/to/video.mp4 --frame-stride 10 --conf 0.35` samples frames, runs YOLOv8n, and writes results to `data/detections/<sha256>.json`.
+5. **Detection summaries** – `python -m cctv_dissertation.app analyze data/detections/<sha256>.json` prints per-class counts, frame coverage, and timestamps; append `--json` for machine-readable output.
+6. **Store detections** – `python -m cctv_dissertation.app store data/detections/<sha256>.json --db data/analysis.db` loads reports into SQLite so investigator queries can filter by class/time/confidence.
+7. **Track objects** – `python -m cctv_dissertation.app track data/detections/<sha256>.json --store --db data/analysis.db` links detections over time (IoU-based) and saves tracks for timeline views.
+8. **Query database** – `python -m cctv_dissertation.app query <sha256> --class car --time-start 5 --time-end 12 --db data/analysis.db` returns either per-frame detections or `--tracks` summaries to support investigator questions.
+
+### Interactive UI
+
+Run the Streamlit dashboard once at least one detection report exists:
+
+```bash
+streamlit run ui/streamlit_app.py
+```
+
+Use the sidebar to:
+
+- Upload a new video (it is saved under `data/uploads/`, ingested, detected, and optionally auto-stored/tracked in SQLite).
+- Select any detection JSON, view summaries, and run class/time/confidence queries against the database.
+
+### REST API
+
+Prefer automation or remote access? Launch the FastAPI server:
+
+```bash
+uvicorn cctv_dissertation.api:app --reload --app-dir src
+```
+
+Key endpoints:
+
+- `POST /upload` – multipart upload with optional `store`/`track` flags.
+- `GET /detections` / `GET /summary/{sha}` – enumerate and inspect detection reports.
+- `GET /query/detections` and `GET /query/tracks` – run the same investigator filters the CLI/UI expose.
+
+### Future Extensions
+
+- **AI deepfake detection:** once the core workflow is stable, integrate a deepfake classifier (e.g., FaceForensics, MesoNet) during ingest so uploaded clips carry authenticity scores alongside hashes.
+- **Visual overlays & exports:** the Streamlit UI already previews frames; future work includes downloadable annotated clips and PDF evidence packets.
+
+Once the ingest path feels reliable (ideally with a dedicated sample clip committed under `tests/`), detection/tracking experiments can hook into the verified files instead of ad-hoc paths.
+
+---
+
 ## Search Term Template
 
 ### Topic
