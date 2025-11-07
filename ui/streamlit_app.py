@@ -32,6 +32,7 @@ from cctv_dissertation.tracking import generate_tracks
 
 DETECTIONS_DIR = Path("data/detections")
 UPLOADS_DIR = Path("data/uploads")
+PREVIEWS_DIR = Path("data/previews")
 
 
 def list_detection_files() -> List[Path]:
@@ -50,12 +51,7 @@ def load_detection_report(path_str: str) -> dict:
     return json.loads(Path(path_str).read_text())
 
 
-@st.cache_data(show_spinner=False)
-def render_frame_image(
-    video_path: str,
-    frame_index: int,
-    detections: Tuple[Tuple[float, ...], ...],
-) -> np.ndarray:
+def read_frame(video_path: str, frame_index: int) -> np.ndarray:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video_path}")
@@ -64,26 +60,7 @@ def render_frame_image(
     cap.release()
     if not ok:
         raise RuntimeError(f"Unable to read frame {frame_index}")
-    for det in detections:
-        x1, y1, x2, y2, r, g, b, label = det
-        cv2.rectangle(
-            frame,
-            (int(x1), int(y1)),
-            (int(x2), int(y2)),
-            (int(b), int(g), int(r)),
-            2,
-        )
-        cv2.putText(
-            frame,
-            label,
-            (int(x1), max(0, int(y1) - 10)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (int(b), int(g), int(r)),
-            2,
-            cv2.LINE_AA,
-        )
-    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    return frame
 
 
 def main() -> None:
@@ -129,7 +106,6 @@ def main() -> None:
                 st.warning("Select a file first.")
             else:
                 handle_upload(uploaded, db_path, auto_store, auto_track)
-                detection_files[:] = list_detection_files()
         st.divider()
         st.subheader("Actions")
         col_a, col_b = st.columns(2)
@@ -290,23 +266,26 @@ def display_visual_preview(report: dict) -> None:
         st.info("No detections to visualize.")
         return
     frame_indices = [frame.get("frame_index", 0) for frame in frames]
-    selected_frame = st.slider(
-        "Frame index",
-        min_value=min(frame_indices),
-        max_value=max(frame_indices),
-        value=frame_indices[0],
-    )
+    min_frame = min(frame_indices)
+    max_frame = max(frame_indices)
+    if min_frame == max_frame:
+        selected_frame = min_frame
+    else:
+        selected_frame = st.slider(
+            "Frame index",
+            min_value=min_frame,
+            max_value=max_frame,
+            value=frame_indices[0],
+            step=1,
+        )
     frame_data = next(
         (frame for frame in frames if frame.get("frame_index") == selected_frame),
         frames[0],
     )
-    detection_payload = detection_draw_payload(frame_data["detections"])
     try:
-        image = render_frame_image(
-            video_path,
-            frame_data.get("frame_index", 0),
-            detection_payload,
-        )
+        frame = read_frame(video_path, frame_data.get("frame_index", 0))
+        image = overlay_detections_on_frame(frame, frame_data["detections"])
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         timestamp = frame_data.get("timestamp_seconds") or 0.0
         st.image(
             image,
@@ -316,6 +295,7 @@ def display_visual_preview(report: dict) -> None:
     except Exception as exc:
         st.error(f"Unable to render frame: {exc}")
     st.dataframe(pd.DataFrame(frame_data["detections"]), hide_index=True)
+    display_video_preview(report)
 
 
 def detection_draw_payload(detections: List[dict]) -> Tuple[Tuple[float, ...], ...]:
@@ -371,6 +351,106 @@ def render_export_controls(payload: Optional[dict]) -> None:
         file_name=f"{mode}_results.csv",
         mime="text/csv",
     )
+
+
+def overlay_detections_on_frame(frame: np.ndarray, detections: List[dict]) -> np.ndarray:
+    overlay = frame.copy()
+    for det in detections:
+        bbox = det.get("bbox_xyxy") or [0, 0, 0, 0]
+        class_name = det.get("class_name") or str(det.get("class_id"))
+        r, g, b = class_color(class_name)
+        label = f"{class_name} {det.get('confidence', 0):.2f}"
+        cv2.rectangle(
+            overlay,
+            (int(bbox[0]), int(bbox[1])),
+            (int(bbox[2]), int(bbox[3])),
+            (int(b), int(g), int(r)),
+            2,
+        )
+        cv2.putText(
+            overlay,
+            label,
+            (int(bbox[0]), max(0, int(bbox[1]) - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (int(b), int(g), int(r)),
+            2,
+            cv2.LINE_AA,
+        )
+    return overlay
+
+
+def ensure_preview_video(report: dict, force: bool = False) -> Optional[Path]:
+    source_path = report.get("source_path")
+    sha = report.get("sha256")
+    if not source_path or not Path(source_path).exists() or not sha:
+        return None
+    PREVIEWS_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = PREVIEWS_DIR / f"{sha}.mp4"
+    if output_path.exists() and not force:
+        return output_path
+
+    frame_map = {
+        frame.get("frame_index"): frame.get("detections", [])
+        for frame in report.get("detections", [])
+    }
+    cap = cv2.VideoCapture(source_path)
+    if not cap.isOpened():
+        return None
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 640)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 360)
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+
+    frame_idx = 0
+    progress = st.progress(0, text="Rendering annotated video...")
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        detections = frame_map.get(frame_idx, [])
+        annotated = overlay_detections_on_frame(frame, detections)
+        writer.write(annotated)
+        frame_idx += 1
+        if frame_idx % 10 == 0:
+            progress.progress(min(frame_idx / max(total_frames, 1), 1.0))
+    progress.progress(1.0)
+    cap.release()
+    writer.release()
+    return output_path
+
+
+def display_video_preview(report: dict) -> None:
+    st.subheader("Video Playback")
+    preview_ready = PREVIEWS_DIR.joinpath(f"{report.get('sha256')}.mp4").exists()
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        generate = st.button(
+            "Generate annotated video" if not preview_ready else "Regenerate video",
+            key=f"generate_video_{report.get('sha256')}",
+        )
+    with col2:
+        play = st.button(
+            "Play current video" if preview_ready else "Play after generation",
+            disabled=not preview_ready,
+            key=f"play_video_{report.get('sha256')}",
+        )
+
+    preview_path = PREVIEWS_DIR / f"{report.get('sha256')}.mp4"
+    if generate:
+        result_path = ensure_preview_video(report, force=True)
+        if result_path:
+            st.success("Annotated video ready.")
+        else:
+            st.error("Unable to render video.")
+
+    if play or (preview_ready and not generate):
+        if preview_path.exists():
+            st.video(str(preview_path))
+        else:
+            st.info("Generate the annotated video first.")
 
 
 def handle_upload(
