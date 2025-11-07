@@ -10,6 +10,8 @@
 
 ### Working Title
 
+Forensics Video Analysis Tool: Automated Detection, Tracking and Integrity Verification System
+
 ### Project Aim (≈100–150 words)
 
 This project aims to develop a forensic video analysis tool that helps investigators work through large amounts of video footage more efficiently by automating the tedious parts of video analysis. The tool will accept video files from any source (CCTV systems, dashcams, phones, body cameras) and use computer vision techniques to automatically detect, track, and filter specific objects, people, and events. Instead of reviewing footage at normal speed, investigators can upload videos and query for specifics (e.g., “red vehicles, between 2 pm and 4 pm”). The system will extract metadata to verify timestamps and support analyzing multiple video files together (e.g., different camera angles). A critical feature is automated hashing to preserve evidence integrity for court: hashing occurs on upload, enabling later proof of non-tampering. The project applies established machine learning and computer vision to real-world digital forensics challenges in a way that’s practically useful for law enforcement and security professionals.
