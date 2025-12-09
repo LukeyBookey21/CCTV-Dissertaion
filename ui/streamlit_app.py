@@ -18,17 +18,20 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from cctv_dissertation.analysis import summarize_detection_report
-from cctv_dissertation.detection import run_yolo_detection, write_detection_report
-from cctv_dissertation.ingest import ingest_video
-from cctv_dissertation.storage import (
+from cctv_dissertation.analysis import summarize_detection_report  # noqa: E402
+from cctv_dissertation.detection import (  # noqa: E402
+    run_yolo_detection,
+    write_detection_report,
+)
+from cctv_dissertation.ingest import ingest_video  # noqa: E402
+from cctv_dissertation.storage import (  # noqa: E402
     DEFAULT_DB_PATH,
     import_detection_report,
     query_detections,
     query_tracks,
     store_tracks,
 )
-from cctv_dissertation.tracking import generate_tracks
+from cctv_dissertation.tracking import generate_tracks  # noqa: E402
 
 DETECTIONS_DIR = Path("data/detections")
 UPLOADS_DIR = Path("data/uploads")
@@ -101,7 +104,9 @@ def main() -> None:
         uploaded = st.file_uploader("Add new video", type=["mp4", "avi", "mov", "mkv"])
         auto_store = st.checkbox("Auto-store detections", value=True)
         auto_track = st.checkbox("Auto-track objects", value=True)
-        if st.button("Process upload", disabled=uploaded is None, use_container_width=True):
+        if st.button(
+            "Process upload", disabled=uploaded is None, use_container_width=True
+        ):
             if uploaded is None:
                 st.warning("Select a file first.")
             else:
@@ -109,7 +114,9 @@ def main() -> None:
         st.divider()
         st.subheader("Actions")
         col_a, col_b = st.columns(2)
-        if col_a.button("Store detections", disabled=selected_file is None, use_container_width=True):
+        if col_a.button(
+            "Store detections", disabled=selected_file is None, use_container_width=True
+        ):
             try:
                 result = import_detection_report(selected_file, db_path)
                 st.success(
@@ -118,7 +125,9 @@ def main() -> None:
                 )
             except Exception as exc:
                 st.error(f"Failed to store detections: {exc}")
-        if col_b.button("Generate tracks", disabled=selected_file is None, use_container_width=True):
+        if col_b.button(
+            "Generate tracks", disabled=selected_file is None, use_container_width=True
+        ):
             try:
                 tracks = generate_tracks(selected_file)
                 store_tracks(tracks["sha256"], tracks["tracks"], db_path)
@@ -296,6 +305,7 @@ def display_visual_preview(report: dict) -> None:
         step=max(1.0 / fps, 0.05),
         key=slider_key,
     )
+
     def frame_time(frame: dict) -> float:
         if frame.get("timestamp_seconds") is not None:
             return float(frame["timestamp_seconds"])
@@ -314,7 +324,7 @@ def display_visual_preview(report: dict) -> None:
         frame_placeholder.video(str(video_path))
         if st.button("⏹️ Stop Video", key=f"stop_{report.get('sha256')}"):
             st.session_state[show_video_key] = False
-            st.experimental_rerun()
+            st.rerun()
         detections_placeholder.info("Video playing. Stop to resume frame inspection.")
         return
 
@@ -340,14 +350,14 @@ def display_visual_preview(report: dict) -> None:
     if control_cols[0].button("⏪ Step Back", key=f"back_{report.get('sha256')}"):
         st.session_state[show_video_key] = False
         st.session_state[pending_key] = max(timestamp - step, 0.0)
-        st.experimental_rerun()
+        st.rerun()
     if control_cols[1].button("▶️ Play Video", key=f"play_{report.get('sha256')}"):
         st.session_state[show_video_key] = True
-        st.experimental_rerun()
+        st.rerun()
     if control_cols[2].button("⏩ Step Forward", key=f"forward_{report.get('sha256')}"):
         st.session_state[show_video_key] = False
         st.session_state[pending_key] = min(timestamp + step, max_duration)
-        st.experimental_rerun()
+        st.rerun()
 
 
 def detection_draw_payload(detections: List[dict]) -> Tuple[Tuple[float, ...], ...]:
@@ -405,7 +415,9 @@ def render_export_controls(payload: Optional[dict]) -> None:
     )
 
 
-def overlay_detections_on_frame(frame: np.ndarray, detections: List[dict]) -> np.ndarray:
+def overlay_detections_on_frame(
+    frame: np.ndarray, detections: List[dict]
+) -> np.ndarray:
     overlay = frame.copy()
     for det in detections:
         bbox = det.get("bbox_xyxy") or [0, 0, 0, 0]
