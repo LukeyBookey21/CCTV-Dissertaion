@@ -23,7 +23,12 @@ from cctv_dissertation.detection import (  # noqa: E402
     run_yolo_detection,
     write_detection_report,
 )
-from cctv_dissertation.ingest import ingest_video  # noqa: E402
+from cctv_dissertation.ingest import ingest_video, verify_video_integrity  # noqa: E402
+from cctv_dissertation.motion import (  # noqa: E402
+    MOTION_PRESETS,
+    add_motion_to_detection_report,
+    detect_motion_in_video,
+)
 from cctv_dissertation.storage import (  # noqa: E402
     DEFAULT_DB_PATH,
     import_detection_report,
@@ -42,6 +47,26 @@ def list_detection_files() -> List[Path]:
     if not DETECTIONS_DIR.exists():
         return []
     return sorted(DETECTIONS_DIR.glob("*.json"))
+
+
+def apply_motion_filter(report_data: dict, motion_filter: Optional[bool]) -> dict:
+    """Filter report data by motion detection results."""
+    if motion_filter is None:
+        return report_data
+
+    filtered_detections = []
+    for frame in report_data.get("detections", []):
+        motion_data = frame.get("motion")
+        if motion_data is None:
+            continue  # Skip frames without motion data
+
+        has_motion = motion_data.get("has_motion", False)
+        if motion_filter == has_motion:
+            filtered_detections.append(frame)
+
+    filtered_report = report_data.copy()
+    filtered_report["detections"] = filtered_detections
+    return filtered_report
 
 
 @st.cache_data(show_spinner=False)
@@ -104,13 +129,39 @@ def main() -> None:
         uploaded = st.file_uploader("Add new video", type=["mp4", "avi", "mov", "mkv"])
         auto_store = st.checkbox("Auto-store detections", value=True)
         auto_track = st.checkbox("Auto-track objects", value=True)
+        enable_motion = st.checkbox("Enable motion detection", value=False)
+
+        # Motion preset selection (only shown if motion is enabled)
+        motion_preset = None
+        if enable_motion:
+            preset_options = list(MOTION_PRESETS.keys())
+            preset_labels = [
+                f"{p.title()} - {MOTION_PRESETS[p]['description']}"
+                for p in preset_options
+            ]
+
+            selected_idx = st.selectbox(
+                "Speed/Accuracy preset",
+                range(len(preset_options)),
+                format_func=lambda i: preset_labels[i],
+                index=1,  # Default to "balanced"
+            )
+            motion_preset = preset_options[selected_idx]
+
         if st.button(
             "Process upload", disabled=uploaded is None, use_container_width=True
         ):
             if uploaded is None:
                 st.warning("Select a file first.")
             else:
-                handle_upload(uploaded, db_path, auto_store, auto_track)
+                handle_upload(
+                    uploaded,
+                    db_path,
+                    auto_store,
+                    auto_track,
+                    enable_motion,
+                    motion_preset,
+                )
         st.divider()
         st.subheader("Actions")
         col_a, col_b = st.columns(2)
@@ -142,17 +193,35 @@ def main() -> None:
 
     summary = cached_summary(str(selected_file))
     report_data = load_detection_report(str(selected_file))
+
+    # Display hash verification status
+    display_hash_verification(report_data)
+
     display_summary(summary, report_data)
     display_visual_preview(report_data)
 
     st.divider()
     st.subheader("Investigator Query")
+
+    # Check if motion data exists in the report
+    has_motion_data = any(
+        frame.get("motion") is not None for frame in report_data.get("detections", [])
+    )
+
+    if has_motion_data:
+        st.info(
+            "This report includes motion detection data. "
+            "Use the Visual Preview slider to browse "
+            "frames by motion."
+        )
+
     query_mode = st.radio(
         "Mode",
         options=["Detections", "Tracks"],
         horizontal=True,
     )
     class_filter = st.text_input("Class filter (optional)", placeholder="e.g. car")
+
     col1, col2, col3 = st.columns(3)
     with col1:
         min_conf = st.slider("Min confidence", 0.0, 1.0, 0.3, 0.05)
@@ -199,6 +268,38 @@ def main() -> None:
         render_export_controls(st.session_state.get("last_query"))
 
 
+def display_hash_verification(report: dict) -> None:
+    """Display hash verification status for the video source."""
+    source_path = report.get("source_path")
+    if not source_path or not Path(source_path).exists():
+        st.warning("⚠️ Source video not found - cannot verify integrity")
+        return
+
+    try:
+        verification = verify_video_integrity(source_path)
+
+        if verification["match"] == "MATCH":
+            ingested = verification.get("ingested_at", "N/A")
+            st.success(
+                "**Video Integrity Verified** - "
+                f"Hash matches manifest (ingested {ingested})"
+            )
+        elif verification["match"] == "MISMATCH":
+            cur = verification["current_hash"][:16]
+            stored = verification["stored_hash"][:16]
+            st.error(
+                "**HASH MISMATCH** - Video may be corrupted "
+                f"or tampered! Current: {cur}... "
+                f"vs Stored: {stored}..."
+            )
+        elif verification["match"] == "NOT_FOUND":
+            st.info(
+                "Video not in manifest - " "Run 'ingest' to add chain-of-custody record"
+            )
+    except Exception as exc:
+        st.warning(f"⚠️ Could not verify hash: {exc}")
+
+
 def display_summary(summary: dict, report: Optional[dict] = None) -> None:
     st.subheader("Detection Summary")
     metrics = st.columns(4)
@@ -212,6 +313,37 @@ def display_summary(summary: dict, report: Optional[dict] = None) -> None:
         else "N/A"
     )
     metrics[3].metric("Time span", span)
+
+    # Show motion statistics if available
+    if report:
+        frames_with_motion_data = [
+            frame
+            for frame in report.get("detections", [])
+            if frame.get("motion") is not None
+        ]
+        if frames_with_motion_data:
+            motion_frames = [
+                f for f in frames_with_motion_data if f["motion"].get("has_motion")
+            ]
+            motion_metrics = st.columns(4)
+            motion_metrics[0].metric("🔴 Frames with motion", len(motion_frames))
+            motion_metrics[1].metric(
+                "⚪ Frames without motion",
+                len(frames_with_motion_data) - len(motion_frames),
+            )
+            motion_pct = (
+                (len(motion_frames) / len(frames_with_motion_data) * 100)
+                if frames_with_motion_data
+                else 0
+            )
+            motion_metrics[2].metric("Motion coverage", f"{motion_pct:.1f}%")
+            avg_motion = (
+                sum(f["motion"].get("motion_percentage", 0) for f in motion_frames)
+                / len(motion_frames)
+                if motion_frames
+                else 0
+            )
+            motion_metrics[3].metric("Avg motion %", f"{avg_motion * 100:.1f}%")
 
     info_cols = st.columns(3)
     info_cols[0].write(f"**Source**: {summary.get('source_path')}")
@@ -333,16 +465,40 @@ def display_visual_preview(report: dict) -> None:
         image = overlay_detections_on_frame(frame, frame_data["detections"])
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         ts = frame_data.get("timestamp_seconds") or 0.0
-        frame_placeholder.image(
-            image,
-            caption=f"Frame {frame_data.get('frame_index')} @ {ts:.2f}s",
-            width="stretch",
-        )
+
+        # Check if motion data exists
+        motion_data = frame_data.get("motion")
+        caption = f"Frame {frame_data.get('frame_index')} @ {ts:.2f}s"
+        if motion_data:
+            has_motion = motion_data.get("has_motion", False)
+            motion_pct = motion_data.get("motion_percentage", 0) * 100
+            motion_indicator = "🔴 Motion" if has_motion else "⚪ No motion"
+            caption += f" | {motion_indicator} ({motion_pct:.1f}%)"
+
+        frame_placeholder.image(image, caption=caption, width="stretch")
     except Exception as exc:
         st.error(f"Unable to render frame: {exc}")
-    detections_placeholder.dataframe(
-        pd.DataFrame(frame_data["detections"]), hide_index=True
-    )
+
+    # Show detections and motion data
+    det_df = pd.DataFrame(frame_data["detections"])
+    if frame_data.get("motion"):
+        detections_placeholder.dataframe(det_df, hide_index=True)
+        motion_cols = st.columns(4)
+        motion_data = frame_data["motion"]
+        motion_cols[0].metric(
+            "Motion Detected", "Yes" if motion_data.get("has_motion") else "No"
+        )
+        motion_cols[1].metric(
+            "Motion %", f"{motion_data.get('motion_percentage', 0) * 100:.2f}%"
+        )
+        motion_cols[2].metric(
+            "Motion Area (px)", motion_data.get("motion_area_pixels", 0)
+        )
+        motion_cols[3].metric(
+            "Moving Objects", motion_data.get("num_moving_objects", 0)
+        )
+    else:
+        detections_placeholder.dataframe(det_df, hide_index=True)
 
     control_cols = st.columns([1, 1, 1])
     step = max(1.0 / fps, 0.05)
@@ -522,6 +678,8 @@ def handle_upload(
     db_path: str,
     auto_store: bool,
     auto_track: bool,
+    enable_motion: bool = False,
+    motion_preset: Optional[str] = None,
 ) -> None:
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     DETECTIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -530,6 +688,22 @@ def handle_upload(
     ingest_video(target)
     with st.spinner("Running detections..."):
         report = run_yolo_detection(str(target))
+
+    # Add motion detection if enabled
+    if enable_motion:
+        preset_desc = (
+            MOTION_PRESETS[motion_preset]["description"] if motion_preset else "default"
+        )
+        with st.spinner(f"Analyzing motion ({preset_desc})..."):
+            motion_results = detect_motion_in_video(str(target), preset=motion_preset)
+            report = add_motion_to_detection_report(report, motion_results)
+            motion_count = sum(1 for m in motion_results if m["has_motion"])
+            st.info(
+                f"Motion analysis complete: "
+                f"{motion_count}/{len(motion_results)} "
+                f"frames with motion"
+            )
+
     report_path = write_detection_report(report)
     st.success(f"Detections saved to {report_path.name}")
     if auto_store:

@@ -8,6 +8,9 @@ torchvision
 fastapi
 uvicorn[standard]
 
+# OCR for license plates
+easyocr
+
 # Utilities
 pyyaml
 python-dateutil

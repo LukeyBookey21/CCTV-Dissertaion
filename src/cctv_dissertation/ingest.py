@@ -169,10 +169,72 @@ def _find_creation_time(
     )
 
 
+def verify_video_integrity(
+    video_path: str | Path,
+    manifest_path: str | Path | None = None,
+) -> Dict[str, Any]:
+    """
+    Verify video integrity by comparing current hash against manifest.
+
+    Returns a dict with:
+        - verified: bool (True if hash matches)
+        - current_hash: str (newly computed)
+        - stored_hash: str | None (from manifest)
+        - match: str (one of "MATCH", "MISMATCH", "NOT_FOUND")
+        - message: str (human-readable status)
+    """
+    source = Path(video_path).expanduser().resolve()
+    if not source.exists():
+        raise FileNotFoundError(f"Video not found: {source}")
+
+    manifest = Path(manifest_path or DEFAULT_MANIFEST_PATH).expanduser().resolve()
+
+    # Compute current hash
+    current_hash = sha256_hash_file(str(source))
+
+    # Search manifest for matching entry by path or hash
+    entries = load_manifest(manifest)
+    stored_entry = None
+
+    for entry in entries:
+        entry_path = Path(entry.get("source_path", "")).resolve()
+        entry_hash = entry.get("sha256")
+
+        if entry_path == source or entry_hash == current_hash:
+            stored_entry = entry
+            break
+
+    if stored_entry is None:
+        return {
+            "verified": False,
+            "current_hash": current_hash,
+            "stored_hash": None,
+            "match": "NOT_FOUND",
+            "message": f"Video not found in manifest: {source}",
+        }
+
+    stored_hash = stored_entry.get("sha256")
+    matches = current_hash == stored_hash
+
+    return {
+        "verified": matches,
+        "current_hash": current_hash,
+        "stored_hash": stored_hash,
+        "match": "MATCH" if matches else "MISMATCH",
+        "message": (
+            f"✓ Integrity verified: {source}"
+            if matches
+            else f"✗ Hash mismatch! File may be corrupted or tampered: {source}"
+        ),
+        "ingested_at": stored_entry.get("ingested_at"),
+    }
+
+
 __all__ = [
     "DEFAULT_MANIFEST_PATH",
     "append_manifest_entry",
     "extract_video_metadata",
     "ingest_video",
     "load_manifest",
+    "verify_video_integrity",
 ]

@@ -4,7 +4,11 @@ import argparse
 import json
 
 from cctv_dissertation.analysis import format_summary, summarize_detection_report
-from cctv_dissertation.ingest import DEFAULT_MANIFEST_PATH, ingest_video
+from cctv_dissertation.ingest import (
+    DEFAULT_MANIFEST_PATH,
+    ingest_video,
+    verify_video_integrity,
+)
 from cctv_dissertation.storage import DEFAULT_DB_PATH
 from cctv_dissertation.utils.hashing import sha256_hash_file
 
@@ -30,6 +34,17 @@ def main() -> None:
         "--manifest",
         default=str(DEFAULT_MANIFEST_PATH),
         help=f"Manifest output path (default: {DEFAULT_MANIFEST_PATH})",
+    )
+
+    verify_parser = subparsers.add_parser(
+        "verify",
+        help="Verify video integrity against stored hash in manifest",
+    )
+    verify_parser.add_argument("file", help="Path to the video file to verify")
+    verify_parser.add_argument(
+        "--manifest",
+        default=str(DEFAULT_MANIFEST_PATH),
+        help=f"Manifest source path (default: {DEFAULT_MANIFEST_PATH})",
     )
 
     detect_parser = subparsers.add_parser(
@@ -60,6 +75,105 @@ def main() -> None:
     detect_parser.add_argument(
         "--output",
         help="Optional output JSON path. Defaults to data/detections/<sha256>.json",
+    )
+    detect_parser.add_argument(
+        "--motion",
+        action="store_true",
+        help="Include motion detection in the report",
+    )
+    detect_parser.add_argument(
+        "--motion-preset",
+        choices=["fast", "balanced", "accurate"],
+        help="Motion detection preset (fast/balanced/accurate). "
+        "Overrides other motion settings.",
+    )
+    detect_parser.add_argument(
+        "--motion-threshold",
+        type=float,
+        default=0.02,
+        help="Motion detection threshold (percentage of frame, "
+        "0.0-1.0). Ignored if preset is used.",
+    )
+
+    motion_parser = subparsers.add_parser(
+        "motion",
+        help="Detect motion in video frames (for filtering)",
+    )
+    motion_parser.add_argument("file", help="Path to the video file")
+    motion_parser.add_argument(
+        "--preset",
+        choices=["fast", "balanced", "accurate"],
+        help="Use preset configuration (fast/balanced/accurate). "
+        "Overrides other settings.",
+    )
+    motion_parser.add_argument(
+        "--frame-stride",
+        type=int,
+        default=5,
+        help="Analyze every Nth frame (ignored if preset is used)",
+    )
+    motion_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.02,
+        help="Motion threshold (percentage of frame, "
+        "0.0-1.0, ignored if preset is used)",
+    )
+    motion_parser.add_argument(
+        "--min-area",
+        type=int,
+        default=500,
+        help="Minimum contour area in pixels (ignored if preset is used)",
+    )
+    motion_parser.add_argument(
+        "--output",
+        help="Optional output JSON path for motion results",
+    )
+
+    plates_parser = subparsers.add_parser(
+        "plates",
+        help="Detect and read license plates in video",
+    )
+    plates_parser.add_argument("file", help="Path to the video file")
+    plates_parser.add_argument(
+        "--model",
+        default="yolov8n.pt",
+        help="Path to YOLOv8 license plate detection model (default: yolov8n.pt)",
+    )
+    plates_parser.add_argument(
+        "--frame-stride",
+        type=int,
+        default=5,
+        help="Analyze every Nth frame",
+    )
+    plates_parser.add_argument(
+        "--detect-conf",
+        type=float,
+        default=0.4,
+        help="Detection confidence threshold "
+        "(0.0-1.0, increased default to reduce false positives)",
+    )
+    plates_parser.add_argument(
+        "--ocr-conf",
+        type=float,
+        default=0.5,
+        help="Minimum OCR confidence to include result (0.0-1.0)",
+    )
+    plates_parser.add_argument(
+        "--max-frames",
+        type=int,
+        help="Maximum frames to process (optional)",
+    )
+    plates_parser.add_argument(
+        "--imgsz",
+        type=int,
+        default=640,
+        help="Image size for YOLO inference "
+        "(640=default, 1280=better for small/distant plates)",
+    )
+    plates_parser.add_argument(
+        "--output",
+        help="Optional output JSON path for plate results",
     )
 
     analyze_parser = subparsers.add_parser(
@@ -92,7 +206,9 @@ def main() -> None:
         help="Assign track IDs to detections and optionally store them",
     )
     track_parser.add_argument("report", help="Path to detection JSON file")
-    track_parser.add_argument("--iou", type=float, default=0.3, help="IoU match threshold")
+    track_parser.add_argument(
+        "--iou", type=float, default=0.3, help="IoU match threshold"
+    )
     track_parser.add_argument(
         "--max-gap",
         type=int,
@@ -157,6 +273,9 @@ def main() -> None:
     elif args.command == "ingest":
         entry = ingest_video(args.file, args.manifest)
         print(json.dumps(entry, indent=2))
+    elif args.command == "verify":
+        result = verify_video_integrity(args.file, args.manifest)
+        print(json.dumps(result, indent=2))
     elif args.command == "detect":
         from cctv_dissertation.detection import (
             run_yolo_detection,
@@ -172,13 +291,144 @@ def main() -> None:
             imgsz=args.imgsz,
             max_frames=args.max_frames,
         )
+
+        # Add motion detection if requested
+        if args.motion:
+            from cctv_dissertation.motion import (
+                MOTION_PRESETS,
+                add_motion_to_detection_report,
+                detect_motion_in_video,
+            )
+
+            if args.motion_preset:
+                preset_desc = MOTION_PRESETS[args.motion_preset]["description"]
+                print(f"Using motion preset: " f"{args.motion_preset} - {preset_desc}")
+                motion_results = detect_motion_in_video(
+                    args.file,
+                    preset=args.motion_preset,
+                )
+                motion_mode = f"preset:{args.motion_preset}"
+            else:
+                motion_results = detect_motion_in_video(
+                    args.file,
+                    frame_stride=args.frame_stride,
+                    motion_threshold=args.motion_threshold,
+                )
+                motion_mode = "manual"
+
+            report = add_motion_to_detection_report(report, motion_results)
+            frames_with_motion = sum(1 for m in motion_results if m["has_motion"])
+            motion_pct = frames_with_motion / len(motion_results) * 100
+            print(
+                f"Motion detected in "
+                f"{frames_with_motion}/{len(motion_results)} "
+                f"frames ({motion_pct:.1f}%)"
+            )
+
         output_path = write_detection_report(report, args.output)
         summary = {
             "output_path": str(output_path),
             "frames_processed": len(report["detections"]),
             "sha256": report["sha256"],
+            "motion_detection_enabled": args.motion,
         }
+        if args.motion:
+            summary["motion_mode"] = motion_mode
+            summary["frames_with_motion"] = frames_with_motion
         print(json.dumps(summary, indent=2))
+    elif args.command == "motion":
+        from cctv_dissertation.motion import (
+            MOTION_PRESETS,
+            detect_motion_in_video,
+        )
+
+        if args.preset:
+            p_desc = MOTION_PRESETS[args.preset]["description"]
+            print(f"Using preset: {args.preset} - {p_desc}")
+            results = detect_motion_in_video(
+                args.file,
+                preset=args.preset,
+            )
+        else:
+            results = detect_motion_in_video(
+                args.file,
+                frame_stride=args.frame_stride,
+                motion_threshold=args.threshold,
+                min_area=args.min_area,
+            )
+
+        if args.output:
+            import json as json_module
+            from pathlib import Path
+
+            output_path = Path(args.output).expanduser().resolve()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json_module.dumps(results, indent=2))
+            print(f"Motion results written to: {output_path}")
+        else:
+            frames_with_motion = sum(1 for r in results if r["has_motion"])
+            print(
+                json.dumps(
+                    {
+                        "total_frames_analyzed": len(results),
+                        "frames_with_motion": frames_with_motion,
+                        "motion_percentage": (
+                            frames_with_motion / len(results) if results else 0
+                        ),
+                        "results": (
+                            results[:10] if len(results) > 10 else results
+                        ),  # Show first 10
+                    },
+                    indent=2,
+                )
+            )
+    elif args.command == "plates":
+        from cctv_dissertation.plates import detect_plates_in_video
+
+        print(f"Detecting license plates using model: {args.model}")
+        print(
+            f"Frame stride: {args.frame_stride}, "
+            f"Detection conf: {args.detect_conf}, "
+            f"OCR conf: {args.ocr_conf}, "
+            f"Image size: {args.imgsz}"
+        )
+
+        plates = detect_plates_in_video(
+            args.file,
+            plate_model_path=args.model,
+            frame_stride=args.frame_stride,
+            detect_conf=args.detect_conf,
+            ocr_min_conf=args.ocr_conf,
+            max_frames=args.max_frames,
+            imgsz=args.imgsz,
+        )
+
+        # Count plates with successful OCR
+        plates_with_text = [p for p in plates if p["text"] is not None]
+
+        if args.output:
+            from pathlib import Path
+
+            output_path = Path(args.output).expanduser().resolve()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json.dumps(plates, indent=2))
+            print(f"Plate results written to: {output_path}")
+        else:
+            print(
+                json.dumps(
+                    {
+                        "total_plates_detected": len(plates),
+                        "plates_with_text": len(plates_with_text),
+                        "success_rate": (
+                            len(plates_with_text) / len(plates) if plates else 0
+                        ),
+                        "plates": (
+                            plates[:10] if len(plates) > 10 else plates
+                        ),  # Show first 10
+                    },
+                    indent=2,
+                )
+            )
     elif args.command == "analyze":
         summary = summarize_detection_report(args.report)
         if args.json:
