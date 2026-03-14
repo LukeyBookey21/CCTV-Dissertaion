@@ -3673,11 +3673,6 @@ def main() -> None:
                 st.session_state["upload_mode"] = "single"
                 st.rerun()
 
-        elif detection_files:
-            tab_detect = st.tabs(["Detections"])[0]
-            with tab_detect:
-                page_detections(selected_det, str(DEFAULT_DB_PATH))
-
         else:
             # Fresh session landing page
             st.title("Forensic CCTV Intelligence")
