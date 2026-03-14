@@ -66,5 +66,957 @@
       "frame_count": 484,
       "creation_time": null
     }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/Cross-camera-garage.mp4",
+    "sha256": "3011322b15c2bd47bd2a104f270f6a501838dcda7d50239387a64b8c5d182969",
+    "ingested_at": "2026-02-04T14:25:39.306577+00:00",
+    "metadata": {
+      "metadata_backend": "opencv",
+      "duration_seconds": 11.994496666666667,
+      "size_bytes": 1398544,
+      "codec": null,
+      "bit_rate": null,
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00917643063527,
+      "frame_count": 240,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/Cross-camera-garage.mp4",
+    "sha256": "3011322b15c2bd47bd2a104f270f6a501838dcda7d50239387a64b8c5d182969",
+    "ingested_at": "2026-02-05T03:11:30.277909+00:00",
+    "metadata": {
+      "metadata_backend": "opencv",
+      "duration_seconds": 11.994496666666667,
+      "size_bytes": 1398544,
+      "codec": null,
+      "bit_rate": null,
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00917643063527,
+      "frame_count": 240,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/Cross-camera-garden.mp4",
+    "sha256": "7f1a60b8f6d45e11c9a7692b9f38880a2725b29c3e8da10614c0b6808f6bba07",
+    "ingested_at": "2026-02-05T03:11:30.307896+00:00",
+    "metadata": {
+      "metadata_backend": "opencv",
+      "duration_seconds": 11.995006666666667,
+      "size_bytes": 1524858,
+      "codec": null,
+      "bit_rate": null,
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325686632936,
+      "frame_count": 240,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/Cross-camera-garage.mp4",
+    "sha256": "3011322b15c2bd47bd2a104f270f6a501838dcda7d50239387a64b8c5d182969",
+    "ingested_at": "2026-02-05T03:14:14.202998+00:00",
+    "metadata": {
+      "metadata_backend": "opencv",
+      "duration_seconds": 11.994496666666667,
+      "size_bytes": 1398544,
+      "codec": null,
+      "bit_rate": null,
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00917643063527,
+      "frame_count": 240,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/20260217_garage_merged.mp4",
+    "sha256": "a7122ee54980cf69a9cc9ec21f1c454899565fccd38896799b176d2bce83066f",
+    "ingested_at": "2026-02-22T16:48:06.609470+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 35995.063681,
+      "size_bytes": 3509088943,
+      "bit_rate": 779904,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008299093064043,
+      "frame_count": 720200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/20260217_garden_merged.mp4",
+    "sha256": "a7122ee54980cf69a9cc9ec21f1c454899565fccd38896799b176d2bce83066f",
+    "ingested_at": "2026-02-22T16:48:13.128894+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 35995.063681,
+      "size_bytes": 3509088943,
+      "bit_rate": 779904,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008299093064043,
+      "frame_count": 720200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/20260217_garage_merged.mp4",
+    "sha256": "a7122ee54980cf69a9cc9ec21f1c454899565fccd38896799b176d2bce83066f",
+    "ingested_at": "2026-02-22T16:52:07.679759+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 35995.063681,
+      "size_bytes": 3509088943,
+      "bit_rate": 779904,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008299093064043,
+      "frame_count": 720200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/20260217_garden_merged.mp4",
+    "sha256": "a7122ee54980cf69a9cc9ec21f1c454899565fccd38896799b176d2bce83066f",
+    "ingested_at": "2026-02-22T16:52:13.092992+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 35995.063681,
+      "size_bytes": 3509088943,
+      "bit_rate": 779904,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008299093064043,
+      "frame_count": 720200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/20260217_garden_merged.mp4",
+    "sha256": "6dbbaea2e58507bf52389075f811680eb10702f0f416901079b54848f0c33d05",
+    "ingested_at": "2026-02-25T17:19:20.543503+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 39599.509659,
+      "size_bytes": 4307081548,
+      "bit_rate": 870128,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008328558093403,
+      "frame_count": 792320,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/20260217_garden_merged.mp4",
+    "sha256": "6dbbaea2e58507bf52389075f811680eb10702f0f416901079b54848f0c33d05",
+    "ingested_at": "2026-02-26T00:23:54.987808+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 39599.509659,
+      "size_bytes": 4307081548,
+      "bit_rate": 870128,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008328558093403,
+      "frame_count": 792320,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/20260217_garage_merged.mp4",
+    "sha256": "a7122ee54980cf69a9cc9ec21f1c454899565fccd38896799b176d2bce83066f",
+    "ingested_at": "2026-02-26T01:07:52.061314+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 35995.063681,
+      "size_bytes": 3509088943,
+      "bit_rate": 779904,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008299093064043,
+      "frame_count": 720200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/20260217_garden_merged.mp4",
+    "sha256": "6dbbaea2e58507bf52389075f811680eb10702f0f416901079b54848f0c33d05",
+    "ingested_at": "2026-02-26T01:07:56.438517+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 39599.509659,
+      "size_bytes": 4307081548,
+      "bit_rate": 870128,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008328558093403,
+      "frame_count": 792320,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/20260217_garage_merged.mp4",
+    "sha256": "a7122ee54980cf69a9cc9ec21f1c454899565fccd38896799b176d2bce83066f",
+    "ingested_at": "2026-02-26T01:10:37.582179+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 35995.063681,
+      "size_bytes": 3509088943,
+      "bit_rate": 779904,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008299093064043,
+      "frame_count": 720200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/20260217_garden_merged.mp4",
+    "sha256": "6dbbaea2e58507bf52389075f811680eb10702f0f416901079b54848f0c33d05",
+    "ingested_at": "2026-02-26T01:10:41.939519+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 39599.509659,
+      "size_bytes": 4307081548,
+      "bit_rate": 870128,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008328558093403,
+      "frame_count": 792320,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/20260217_garage_merged.mp4",
+    "sha256": "4f10b7a7f12fc15c0dc57b986177015194f7300b979baf3980e821d29b67abb8",
+    "ingested_at": "2026-02-26T16:20:55.154973+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 25257.536022,
+      "size_bytes": 2463763957,
+      "bit_rate": 780365,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008285826712754,
+      "frame_count": 505360,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/20260217_garden_merged.mp4",
+    "sha256": "a5caef6561d5e5caefb11dba7d05ce2a34000110affcbf6f937ad22ccd06f71e",
+    "ingested_at": "2026-02-26T16:23:46.175789+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 25259.483798,
+      "size_bytes": 2727002833,
+      "bit_rate": 863676,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00832653793269,
+      "frame_count": 505400,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-26T17:05:23.510231+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-26T17:05:23.883708+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-26T17:22:08.790991+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-26T17:22:09.213424+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-26T17:28:49.554529+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-26T17:28:49.906410+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-26T17:41:58.547085+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-26T17:41:58.911969+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T14:34:21.435219+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T14:34:35.450975+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T14:39:14.009683+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T14:39:14.378957+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T14:44:01.956537+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T14:44:02.307485+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T14:45:30.688482+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T14:45:31.078730+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T14:55:28.382485+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T14:55:28.726217+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T14:59:49.913431+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T14:59:50.256114+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T15:07:35.104364+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T15:07:35.489312+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T15:40:16.050818+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T15:40:16.447528+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T15:45:45.854799+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T15:45:46.238326+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T15:45:59.298734+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T15:45:59.685667+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T15:46:20.931350+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T15:46:21.317625+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T15:50:31.297265+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T15:50:31.680585+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T15:55:20.805894+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T15:55:21.197478+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T15:59:21.417544+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T15:59:21.811010+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T16:07:00.420577+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T16:07:00.810240+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garage_short.mp4",
+    "sha256": "8caddd1e1b5a1ad365893e8eb929b4230efbeabdb0a34bc8d2b82c076f091139",
+    "ingested_at": "2026-02-27T16:07:21.551633+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.973762,
+      "size_bytes": 245372441,
+      "bit_rate": 798292,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.00834688315371,
+      "frame_count": 49200,
+      "creation_time": null
+    }
+  },
+  {
+    "source_path": "/workspaces/CCTV-Dissertaion/data/uploads/test_garden_short.mp4",
+    "sha256": "da6ac55b87ecbfcc1c750b00bf05ed954bd59657bf18a928edd0e7abf137316f",
+    "ingested_at": "2026-02-27T16:07:21.998898+00:00",
+    "metadata": {
+      "metadata_backend": "ffprobe",
+      "duration_seconds": 2458.976359,
+      "size_bytes": 267537849,
+      "bit_rate": 870403,
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "frame_rate": 20.008325747659324,
+      "frame_count": 49200,
+      "creation_time": null
+    }
   }
 ]

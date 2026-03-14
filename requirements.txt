@@ -16,5 +16,8 @@ pyyaml
 python-dateutil
 streamlit
 
+# Report generation
+fpdf2
+
 # For packaging / CLI
 click

@@ -169,6 +169,131 @@ def _find_creation_time(
     )
 
 
+def merge_dvr_segments(
+    dvr_folder: str | Path,
+    output_path: str | Path,
+    start_hour: int = 0,
+    end_hour: int = 23,
+    start_minute: int = 0,
+    end_minute: int = 59,
+    callback: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Merge DVR minute-segment files into a single MP4 for processing.
+
+    DVR systems typically record as YYYYMMDD_camera/HH/MM.mp4.
+    This function scans a camera folder, validates readable files in
+    the requested time range, writes an ffmpeg concat list, and merges
+    them with stream-copy (no re-encode, very fast).
+
+    Args:
+        dvr_folder:    Path to the camera folder (e.g. 20260217_garage)
+        output_path:   Destination MP4 path for the merged file
+        start_hour:    First hour to include (inclusive, 0-23)
+        end_hour:      Last hour to include (inclusive, 0-23)
+        start_minute:  Minute within start_hour to begin from (0-59)
+        end_minute:    Minute within end_hour to stop at (0-59)
+        callback:      Optional callable(progress_pct, message) for UI updates
+
+    Returns:
+        Dict with keys: output_path, total_files, skipped_files,
+        duration_seconds, start_hour, end_hour
+    """
+    import subprocess
+    import tempfile
+
+    dvr_folder = Path(dvr_folder).resolve()
+    output_path = Path(output_path).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build the full list of (hour, minute) tuples in range
+    time_slots = []
+    for hour in range(start_hour, end_hour + 1):
+        for minute in range(60):
+            if hour == start_hour and minute < start_minute:
+                continue
+            if hour == end_hour and minute > end_minute:
+                continue
+            time_slots.append((hour, minute))
+
+    # Scan and validate all segment files in the time range
+    valid_files: List[Path] = []
+    skipped: List[str] = []
+    total_expected = len(time_slots)
+
+    for checked, (hour, minute) in enumerate(time_slots):
+        seg = dvr_folder / f"{hour:02d}" / f"{minute:02d}.mp4"
+
+        if not seg.exists():
+            skipped.append(f"{hour:02d}:{minute:02d} - missing")
+            continue
+
+        cap = cv2.VideoCapture(str(seg))
+        readable = cap.isOpened() and cap.get(cv2.CAP_PROP_FPS) > 0
+        cap.release()
+
+        if readable:
+            valid_files.append(seg)
+        else:
+            skipped.append(f"{hour:02d}:{minute:02d} - unreadable")
+
+        if callback and checked % 60 == 0:
+            pct = int(((checked + 1) / total_expected) * 40)
+            callback(pct, f"Scanning {hour:02d}:{minute:02d}...")
+
+    if not valid_files:
+        raise RuntimeError(f"No readable video segments found in {dvr_folder}")
+
+    if callback:
+        callback(40, f"Found {len(valid_files)} valid segments, merging...")
+
+    # Write ffmpeg concat list
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
+        for f in valid_files:
+            tmp.write(f"file '{f}'\n")
+        concat_list = tmp.name
+
+    # Merge with ffmpeg stream-copy (fast, no re-encode)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        concat_list,
+        "-c:v",
+        "copy",
+        "-an",  # drop audio - DVR audio codecs often unsupported in MP4
+        str(output_path),
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    Path(concat_list).unlink(missing_ok=True)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg merge failed: {result.stderr[-500:]}")
+
+    if callback:
+        callback(100, "Merge complete!")
+
+    # Get output metadata
+    cap = cv2.VideoCapture(str(output_path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 20.0
+    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    cap.release()
+
+    return {
+        "output_path": str(output_path),
+        "total_files": len(valid_files),
+        "skipped_files": len(skipped),
+        "skipped_details": skipped[:10],  # first 10 only
+        "duration_seconds": frames / fps if frames else None,
+        "start_hour": start_hour,
+        "end_hour": end_hour,
+    }
+
+
 def verify_video_integrity(
     video_path: str | Path,
     manifest_path: str | Path | None = None,

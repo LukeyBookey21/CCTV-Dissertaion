@@ -15,6 +15,13 @@ data/analysis.db
 data/manifests/ingest_manifest.json
 data/detections/*.json
 
+# Large data files — not committed to git
+data/TEST VIDEOS /
+data/*.db
+data/debug_plates/
+data/tracked_output/
+data/ground_truth/
+
 # VS Code
 .vscode/
 # Virtualenvs

@@ -147,8 +147,8 @@ class PersonReID:
         output_dir: str,
         camera_id: Optional[str] = None,
         person_conf: float = 0.25,  # Lower to catch more people
-        similarity_threshold: float = 0.35,  # Lower to merge more duplicates
-        frame_stride: int = 3,  # More samples
+        similarity_threshold: float = 0.47,
+        frame_stride: int = 5,  # Sample every 5th frame
     ) -> List[Dict[str, Any]]:
         """
         Process a video: detect people, extract features, deduplicate, save to DB.
@@ -275,12 +275,22 @@ class PersonReID:
         return results
 
     def _deduplicate(self, detections: List[Dict], threshold: float) -> List[Dict]:
-        """Deduplicate detections using feature similarity with temporal awareness."""
+        """Deduplicate detections using feature similarity.
+
+        Greedy clustering: sorts by bbox area (largest first),
+        then merges any later detection whose similarity to
+        the cluster leader exceeds the threshold.
+        """
         if not detections:
             return []
 
-        # Sort by area (larger = closer = clearer)
-        sorted_dets = sorted(detections, key=lambda x: x["bbox_area"], reverse=True)
+        # Filter very small / partial detections
+        min_area = 2500
+        dets = [d for d in detections if d["bbox_area"] >= min_area]
+        if not dets:
+            dets = detections
+
+        sorted_dets = sorted(dets, key=lambda x: x["bbox_area"], reverse=True)
 
         clusters = []
         used = set()
@@ -296,20 +306,18 @@ class PersonReID:
                 if j in used:
                     continue
 
-                # If same/nearby frame, they MUST be different people (can't merge)
-                # With stride=3, detections within 3 frames are same moment
-                same_moment = abs(det["frame_idx"] - other["frame_idx"]) <= 3
-                if same_moment:
+                # Same frame = must be different people
+                if abs(det["frame_idx"] - other["frame_idx"]) <= 1:
                     continue
 
-                similarity = self.compute_similarity(det["features"], other["features"])
-                if similarity >= threshold:
+                sim = self.compute_similarity(det["features"], other["features"])
+                if sim >= threshold:
                     cluster.append(other)
                     used.add(j)
 
             clusters.append(cluster)
 
-        # Pick best from each cluster
+        # Pick best (largest, clearest) from each cluster
         unique = []
         for cluster in clusters:
             best = max(cluster, key=lambda x: x["bbox_area"])
