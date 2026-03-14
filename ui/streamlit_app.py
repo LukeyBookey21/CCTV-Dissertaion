@@ -3713,7 +3713,7 @@ def main() -> None:
                     "Session files (.zip) contain the full tracking database "
                     "and all crop images. Original video files are not required "
                     "to restore a session.",
-                    icon="✓",
+                    icon="✅",
                 )
 
             st.divider()
