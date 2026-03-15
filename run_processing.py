@@ -18,7 +18,7 @@ GARDEN = str(PROJECT_ROOT / "data" / "uploads" / "garden_merged.mp4")
 CAM_A = "garage"
 CAM_B = "garden"
 
-STRIDE = 10
+STRIDE = 20
 
 
 def run_camera(video_path: str, camera_label: str):
