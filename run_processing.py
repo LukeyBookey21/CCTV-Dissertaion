@@ -50,6 +50,10 @@ def run_camera(video_path: str, camera_label: str):
     print(f"\n[{camera_label}] Done — {n_persons} persons, {n_vehicles} vehicles")
 
 
+# Initialise DB schema before threads start to avoid race condition
+_init_tracker = SingleCameraTracker(db_path=DB_PATH)
+del _init_tracker
+
 t_a = threading.Thread(target=run_camera, args=(GARAGE, CAM_A))
 t_b = threading.Thread(target=run_camera, args=(GARDEN, CAM_B))
 
