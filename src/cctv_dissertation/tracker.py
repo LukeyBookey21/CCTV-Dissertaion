@@ -14,7 +14,10 @@ import torch.nn.functional as F
 from torchvision import transforms
 from ultralytics import YOLO
 
-from cctv_dissertation.attributes import describe_person, describe_vehicle
+from cctv_dissertation.attributes import (
+    describe_person,
+    describe_vehicle,
+)
 
 
 def _reencode_h264(src: str) -> str:
@@ -1482,8 +1485,6 @@ def _match_entities(
             if eb["_emb"] is None:
                 continue
             sim = float(np.dot(ea["_emb"], eb["_emb"]))
-            if sim < threshold:
-                continue
 
             time_gap = min(
                 abs(ea["first_ts"] - eb["first_ts"]),
@@ -1497,6 +1498,8 @@ def _match_entities(
                 temporal_bonus = 0.0
 
             score = sim + temporal_bonus
+            if score < threshold:
+                continue
             all_pairs.append((score, sim, i, j, ea, eb))
 
     # Sort by score descending — best pairs assigned first
@@ -1669,19 +1672,15 @@ def build_unified_identities(
                 for eb in cam_eids[i + 1 :]:
                     if _wc_embs[ea] is None or _wc_embs[eb] is None:
                         continue
-                    # Only count pairs that would actually pass
-                    # the within-camera time-gap threshold —
-                    # a high sim at an unreachable gap shouldn't
-                    # block a valid cross-camera match.
+                    # Only count temporally close pairs (<120s)
+                    # as priority blockers.  Long-gap within-camera
+                    # matches may be false (different people in
+                    # similar clothes) and shouldn't block valid
+                    # cross-camera links.
                     tg = abs(_wc_ts.get(ea, 0) - _wc_ts.get(eb, 0))
-                    if tg <= 30:
-                        wt = 0.60
-                    elif tg <= 120:
-                        wt = 0.62
-                    elif tg >= 300:
-                        wt = 0.85
-                    else:
-                        wt = 0.62 + (tg - 120) / 180.0 * 0.23
+                    if tg > 120:
+                        continue
+                    wt = 0.55
                     s = float(np.dot(_wc_embs[ea], _wc_embs[eb]))
                     if s < wt:
                         continue  # wouldn't merge, don't count
@@ -1745,6 +1744,17 @@ def build_unified_identities(
         for eid, e in type_entities.items():
             by_camera.setdefault(e["camera_label"], []).append((eid, e))
 
+        # Track entities that have cross-camera matches so
+        # within-camera merges don't accidentally collapse two
+        # different cross-camera groups together.
+        cross_matched: set = set()
+        for m in match_list:
+            ea, eb = m["entity_a"]["id"], m["entity_b"]["id"]
+            if uf.find(ea) == uf.find(eb):
+                # This pair was actually merged (not blocked)
+                cross_matched.add(ea)
+                cross_matched.add(eb)
+
         for _cam, cam_entities in by_camera.items():
             # Pre-parse embeddings once per camera
             embs: Dict[int, Optional[np.ndarray]] = {}
@@ -1785,7 +1795,7 @@ def build_unified_identities(
                         a_j = (bx_j[2] - bx_j[0]) * (bx_j[3] - bx_j[1])
                         union = a_i + a_j - inter
                         iou = inter / union if union > 0 else 0
-                        if iou > 0.7:
+                        if iou > 0.5:
                             uf.union(eid_i, eid_j)
                     else:
                         # Persons: merge by embedding similarity,
@@ -1798,19 +1808,62 @@ def build_unified_identities(
                             time_gap = abs(
                                 (ei.get("first_ts") or 0) - (ej.get("first_ts") or 0)
                             )
-                            # Very close (<30s): 0.60 threshold
-                            # Close together (<120s): 0.62 threshold
-                            # Far apart (>300s): 0.85 threshold
-                            # Linear interpolation between
+
+                            # Check clothing description similarity
+                            # to allow lower thresholds for long gaps
+                            # when the person looks the same.
+                            def _color_group(c: str) -> str:
+                                c = c.lower().strip()
+                                if c in ("black", "dark grey", "dark gray"):
+                                    return "dark"
+                                if c in ("grey", "gray", "light grey"):
+                                    return "grey"
+                                if c in ("white", "light"):
+                                    return "light"
+                                return c
+
+                            desc_i = (
+                                ei.get("upper_color") or "",
+                                ei.get("lower_color") or "",
+                            )
+                            desc_j = (
+                                ej.get("upper_color") or "",
+                                ej.get("lower_color") or "",
+                            )
+                            same_clothes = (
+                                _color_group(desc_i[0]) == _color_group(desc_j[0])
+                                and _color_group(desc_i[1]) == _color_group(desc_j[1])
+                                and desc_i[0] != ""
+                                and desc_i[1] != ""
+                            )
+                            # Very close (<30s): 0.55 threshold
+                            # Close together (<120s): 0.55 threshold
+                            # Far apart (>300s): 0.85 normally,
+                            #   but 0.62 if same clothing, or 0.70
+                            #   for high-confidence matches
                             if time_gap <= 30:
-                                thresh = 0.60
+                                thresh = 0.55
                             elif time_gap <= 120:
-                                thresh = 0.62
+                                thresh = 0.55
+                            elif same_clothes:
+                                thresh = 0.68
                             elif time_gap >= 300:
-                                thresh = 0.85
+                                thresh = 0.80
                             else:
                                 t = (time_gap - 120) / 180.0
                                 thresh = 0.62 + t * 0.23
+                            # Cross-camera anchor protection:
+                            # if BOTH entities already have cross-camera
+                            # matches in different groups, require very
+                            # high similarity to prevent false collapse.
+                            # If only one is cross-matched, allow normal
+                            # merging (adds sightings to existing identity).
+                            if (
+                                eid_i in cross_matched
+                                and eid_j in cross_matched
+                                and uf.find(eid_i) != uf.find(eid_j)
+                            ):
+                                thresh = max(thresh, 0.85)
                             if sim >= thresh:
                                 uf.union(eid_i, eid_j)
 

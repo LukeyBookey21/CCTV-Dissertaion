@@ -190,10 +190,64 @@ def extract_region_color(image: np.ndarray, k: int = 5) -> str:
 # ── Person attributes ──────────────────────────────────────────────
 
 
+def _extract_hair_color(crop: np.ndarray) -> str:
+    """Extract hair color from the top portion of a person crop.
+
+    Looks at the top 15% (head region), centre 40% width strip
+    to avoid background.  Picks the dominant non-skin, non-background
+    cluster as hair.
+    """
+    h, w = crop.shape[:2]
+    head = crop[0 : int(h * 0.15), int(w * 0.30) : int(w * 0.70)]
+    if head.size < 30:
+        return "unknown"
+    clusters = _kmeans_clusters(head, k=3)
+    for c in clusters:
+        hsv = c["hsv"]
+        hue, sat, val = int(hsv[0]), int(hsv[1]), int(hsv[2])
+        # Skip skin tones (orange-ish, low-med sat)
+        if 5 <= hue <= 25 and 40 <= sat <= 170 and val > 100:
+            continue
+        # Skip background
+        if _is_background_color(hsv):
+            continue
+        name = bgr_to_color_name(c["bgr"])
+        # Map to hair-specific names
+        if name in ("black", "dark grey"):
+            return "dark"
+        if name in ("brown", "olive"):
+            return "brown"
+        if name in ("orange", "red"):
+            return "red"
+        if name in ("yellow", "beige"):
+            return "blonde"
+        if name in ("grey", "white"):
+            return "light"
+        return name
+    return "unknown"
+
+
+def _estimate_build(crop: np.ndarray) -> str:
+    """Estimate body build from crop aspect ratio.
+
+    A tall narrow crop (ratio < 0.40) suggests slim build.
+    A wider crop (ratio > 0.55) suggests stocky build.
+    """
+    h, w = crop.shape[:2]
+    if h < 10:
+        return "unknown"
+    ratio = w / h
+    if ratio < 0.40:
+        return "slim"
+    if ratio > 0.55:
+        return "stocky"
+    return "medium"
+
+
 def describe_person(crop: np.ndarray) -> Dict[str, str]:
     """
     Describe a person crop by splitting into upper and lower body
-    and extracting dominant clothing colors.
+    and extracting dominant clothing colors, plus hair color and build.
 
     Uses the centre strip of the crop to avoid side background,
     and skips clusters that look like brick/pavement.
@@ -202,6 +256,8 @@ def describe_person(crop: np.ndarray) -> Dict[str, str]:
         return {
             "upper_color": "unknown",
             "lower_color": "unknown",
+            "hair_color": "unknown",
+            "build": "unknown",
             "description": "unknown",
         }
 
@@ -225,10 +281,15 @@ def describe_person(crop: np.ndarray) -> Dict[str, str]:
     upper_color = bgr_to_color_name(upper_bgr)
     lower_color = bgr_to_color_name(lower_bgr)
 
+    hair_color = _extract_hair_color(crop)
+    build = _estimate_build(crop)
+
     description = f"{upper_color} top, {lower_color} bottom"
     return {
         "upper_color": upper_color,
         "lower_color": lower_color,
+        "hair_color": hair_color,
+        "build": build,
         "description": description,
     }
 
