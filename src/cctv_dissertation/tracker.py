@@ -672,12 +672,23 @@ class SingleCameraTracker:
             f"vehicles={len(vehicle_tracks)}"
         )
 
-        # Build summaries for each track
+        # Build summaries for each track — pass video_path so frames
+        # evicted from cache can be re-read from disk (critical for
+        # long videos where cache_limit << total frames).
         persons = self._build_person_summaries(
-            person_tracks, frame_cache, fps, output_dir
+            person_tracks,
+            frame_cache,
+            fps,
+            output_dir,
+            video_path=str(video_path),
         )
         vehicles = self._build_vehicle_summaries(
-            vehicle_tracks, frame_cache, fps, output_dir, plate_conf
+            vehicle_tracks,
+            frame_cache,
+            fps,
+            output_dir,
+            plate_conf,
+            video_path=str(video_path),
         )
 
         # Persist to database
@@ -1067,18 +1078,40 @@ class SingleCameraTracker:
 
         return merged
 
+    @staticmethod
+    def _read_frame(video_path: str, frame_idx: int) -> Optional[np.ndarray]:
+        """Read a single frame from video file (fallback for cache miss)."""
+        cap = cv2.VideoCapture(video_path)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        cap.release()
+        return frame if ret else None
+
+    def _get_frame(
+        self,
+        frame_idx: int,
+        frame_cache: Dict[int, np.ndarray],
+        video_path: Optional[str] = None,
+    ) -> Optional[np.ndarray]:
+        """Get frame from cache, falling back to video file if needed."""
+        frame = frame_cache.get(frame_idx)
+        if frame is None and video_path:
+            frame = self._read_frame(video_path, frame_idx)
+        return frame
+
     def _build_person_summaries(
         self,
         tracks: Dict[int, List[dict]],
         frame_cache: Dict[int, np.ndarray],
         fps: float,
         output_dir: Path,
+        video_path: Optional[str] = None,
     ) -> List[dict]:
         """For each person track, pick the best crop and describe them."""
         summaries = []
         for track_id, dets in sorted(tracks.items()):
             best = max(dets, key=lambda d: d["area"])
-            frame = frame_cache.get(best["frame_idx"])
+            frame = self._get_frame(best["frame_idx"], frame_cache, video_path)
             if frame is None:
                 continue
 
@@ -1098,7 +1131,7 @@ class SingleCameraTracker:
             upper_votes: List[str] = []
             lower_votes: List[str] = []
             for det in top_dets:
-                f = frame_cache.get(det["frame_idx"])
+                f = self._get_frame(det["frame_idx"], frame_cache, video_path)
                 if f is None:
                     continue
                 bx1, by1, bx2, by2 = det["bbox"]
@@ -1204,6 +1237,7 @@ class SingleCameraTracker:
         fps: float,
         output_dir: Path,
         plate_conf: float,
+        video_path: Optional[str] = None,
     ) -> List[dict]:
         """For each vehicle track, pick the best crop and describe colour/plate."""
         summaries = []
@@ -1224,7 +1258,7 @@ class SingleCameraTracker:
                     break
             if best is None:
                 best = max(dets, key=lambda d: d["area"])
-            frame = frame_cache.get(best["frame_idx"])
+            frame = self._get_frame(best["frame_idx"], frame_cache, video_path)
             if frame is None:
                 continue
 

@@ -260,13 +260,14 @@ def _get_unified_identities(cam_a: str, cam_b: str) -> dict:
 
     from cctv_dissertation.tracker import build_unified_identities
 
-    result = build_unified_identities(
-        str(TRACKER_DB),
-        cam_a,
-        cam_b,
-        person_threshold=0.45,
-        vehicle_threshold=0.80,
-    )
+    with st.spinner("Matching identities across cameras — this may take a moment..."):
+        result = build_unified_identities(
+            str(TRACKER_DB),
+            cam_a,
+            cam_b,
+            person_threshold=0.45,
+            vehicle_threshold=0.80,
+        )
     st.session_state[cache_key] = result
     st.session_state[cam_key] = (cam_a, cam_b)
     st.session_state[mtime_key] = db_mtime
