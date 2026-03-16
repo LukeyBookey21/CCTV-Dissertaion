@@ -3326,11 +3326,23 @@ def main() -> None:
         initial_sidebar_state="expanded",
     )
 
-    # ── Session init: wipe data on every new browser session ──────────────────
+    # ── Session init: preserve existing data across browser sessions ──────────
     if "session_initialized" not in st.session_state:
-        _clear_session_data()
         st.session_state["session_initialized"] = True
-        st.session_state["session_status"] = "fresh"
+        # Check if DB already has tracked data from a previous processing run
+        has_data = False
+        if TRACKER_DB.exists():
+            try:
+                import sqlite3 as _sqlite3
+
+                with _sqlite3.connect(str(TRACKER_DB)) as _c:
+                    (_n,) = _c.execute(
+                        "SELECT COUNT(*) FROM tracked_entities"
+                    ).fetchone()
+                    has_data = _n > 0
+            except Exception:
+                pass
+        st.session_state["session_status"] = "active" if has_data else "fresh"
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
