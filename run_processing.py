@@ -12,13 +12,13 @@ from cctv_dissertation.tracker import SingleCameraTracker  # noqa: E402
 DB_PATH = str(PROJECT_ROOT / "data" / "tracker.db")
 TRACKED_OUTPUT = PROJECT_ROOT / "data" / "tracked_output"
 
-GARAGE = str(PROJECT_ROOT / "data" / "uploads" / "garage_merged.mp4")
-GARDEN = str(PROJECT_ROOT / "data" / "uploads" / "garden_merged.mp4")
+GARAGE = str(PROJECT_ROOT / "data" / "uploads" / "garage_1h.mp4")
+GARDEN = str(PROJECT_ROOT / "data" / "uploads" / "garden_1h.mp4")
 
 CAM_A = "garage"
 CAM_B = "garden"
 
-STRIDE = 20
+STRIDE = 10
 
 
 def run_camera(video_path: str, camera_label: str):
