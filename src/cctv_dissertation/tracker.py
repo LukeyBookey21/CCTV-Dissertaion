@@ -1725,7 +1725,24 @@ def build_unified_identities(
 
         # Union cross-camera matched pairs, skipping any match
         # where either entity has a stronger within-camera partner
-        # or where the time gap is too large for the similarity.
+        # that belongs to a DIFFERENT identity group.  If the strong
+        # partner is already in the same UF group as the candidate,
+        # it shouldn't block — they're the same person.
+        _wc_best_partner: Dict[int, int] = {}
+        for cam_eids in eids_by_cam.values():
+            for i, ea in enumerate(cam_eids):
+                for eb in cam_eids[i + 1 :]:
+                    if _wc_embs[ea] is None or _wc_embs[eb] is None:
+                        continue
+                    tg = abs(_wc_ts.get(ea, 0) - _wc_ts.get(eb, 0))
+                    if tg > 120:
+                        continue
+                    s = float(np.dot(_wc_embs[ea], _wc_embs[eb]))
+                    if s > best_wc_sim.get(ea, 0):
+                        _wc_best_partner[ea] = eb
+                    if s > best_wc_sim.get(eb, 0):
+                        _wc_best_partner[eb] = ea
+
         for m in match_list:
             eid_a = m["entity_a"]["id"]
             eid_b = m["entity_b"]["id"]
@@ -1733,93 +1750,51 @@ def build_unified_identities(
             wc_a = best_wc_sim.get(eid_a, 0)
             wc_b = best_wc_sim.get(eid_b, 0)
             margin = 0.08
-            if wc_a > cross_sim + margin or wc_b > cross_sim + margin:
+            # Only block if the strong within-camera partner is in
+            # a different group — if partner is already merged with
+            # the candidate, it shouldn't prevent cross-camera linking.
+            block = False
+            if wc_a > cross_sim + margin:
+                partner = _wc_best_partner.get(eid_a)
+                if partner is not None and uf.find(partner) != uf.find(eid_a):
+                    block = True
+            if wc_b > cross_sim + margin:
+                partner = _wc_best_partner.get(eid_b)
+                if partner is not None and uf.find(partner) != uf.find(eid_b):
+                    block = True
+            if block:
                 continue
-            # Time-proximity gate: someone walking between cameras
-            # appears within ~2 minutes.  Longer gaps need higher sim.
+            # Time-proximity gate: cross-camera matches over long
+            # gaps need higher similarity.  A person walking between
+            # cameras takes < 2 minutes.
             if entity_type == "person":
                 ts_a = _wc_ts.get(eid_a, 0)
                 ts_b = _wc_ts.get(eid_b, 0)
                 cross_gap = abs(ts_a - ts_b)
-                if cross_gap > 600 and cross_sim < 0.65:
+                if cross_gap > 600 and cross_sim < 0.70:
                     continue
                 if cross_gap > 120 and cross_sim < 0.55:
                     continue
             uf.union(eid_a, eid_b)
 
-        # Get all entities of this type, filtering out noise.
-        # For vehicles we include ALL tracks initially so IoU-based
-        # merging can bridge short DVR boundary fragments, then
-        # filter noise afterwards.
-        frame_area = 1920 * 1080  # standard HD
+        # Get all entities of this type, filtering out noise (0-duration singletons)
         type_entities = {}
-        _all_vehicle_entities = {}  # pre-filter set for IoU bridge
         for eid, e in all_entities_dict.items():
             if e["entity_type"] != entity_type:
                 continue
+            # Skip noise tracks:
+            # - Person: 0-duration (single-frame false positives)
+            # - Vehicle: short fragments (<120s) are usually detection
+            #   noise during transitions (someone walking past a parked
+            #   car), not real vehicles.
             dur = (e["last_ts"] or 0) - (e["first_ts"] or 0)
-            # Filter junk detections covering >50% of frame
-            bw = (e.get("bbox_x2") or 0) - (e.get("bbox_x1") or 0)
-            bh = (e.get("bbox_y2") or 0) - (e.get("bbox_y1") or 0)
-            if bw * bh > frame_area * 0.5:
+            if dur < 0.1 and entity_type == "person":
                 continue
-            # Person: skip tracks < 2s (nighttime noise)
-            if entity_type == "person" and dur < 2.0:
+            if entity_type == "vehicle" and dur < 300:
                 continue
             if dur < 0.1 and e.get("description", "").startswith("unknown"):
                 continue
-            if entity_type == "vehicle":
-                _all_vehicle_entities[eid] = e
-                # Also add to main set if long enough
-                if dur >= 300:
-                    type_entities[eid] = e
-            else:
-                type_entities[eid] = e
-
-        # For vehicles: run IoU merge on ALL tracks first to bridge
-        # short DVR boundary fragments, then add merged groups.
-        if entity_type == "vehicle" and _all_vehicle_entities:
-            _veh_uf = UnionFind()
-            _veh_list = list(_all_vehicle_entities.items())
-            for i in range(len(_veh_list)):
-                ei_id, ei = _veh_list[i]
-                bx_i = (
-                    ei.get("bbox_x1", 0),
-                    ei.get("bbox_y1", 0),
-                    ei.get("bbox_x2", 0),
-                    ei.get("bbox_y2", 0),
-                )
-                for j in range(i + 1, len(_veh_list)):
-                    ej_id, ej = _veh_list[j]
-                    if ei["camera_label"] != ej["camera_label"]:
-                        continue
-                    bx_j = (
-                        ej.get("bbox_x1", 0),
-                        ej.get("bbox_y1", 0),
-                        ej.get("bbox_x2", 0),
-                        ej.get("bbox_y2", 0),
-                    )
-                    ix1 = max(bx_i[0], bx_j[0])
-                    iy1 = max(bx_i[1], bx_j[1])
-                    ix2 = min(bx_i[2], bx_j[2])
-                    iy2 = min(bx_i[3], bx_j[3])
-                    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-                    a_i = (bx_i[2] - bx_i[0]) * (bx_i[3] - bx_i[1])
-                    a_j = (bx_j[2] - bx_j[0]) * (bx_j[3] - bx_j[1])
-                    union_a = a_i + a_j - inter
-                    iou = inter / union_a if union_a > 0 else 0
-                    if iou > 0.7:
-                        _veh_uf.union(ei_id, ej_id)
-            # Add short fragments that bridged to a long track
-            for ei_id in _all_vehicle_entities:
-                _veh_uf.find(ei_id)
-            for _root, eids in _veh_uf.get_clusters().items():
-                has_long = any(eid in type_entities for eid in eids)
-                if has_long:
-                    for eid in eids:
-                        if eid not in type_entities:
-                            type_entities[eid] = _all_vehicle_entities[eid]
-                            uf.union(eid, next(e for e in eids if e in type_entities))
+            type_entities[eid] = e
 
         # Deduplicate exact-timestamp duplicates (DB double-insert bug).
         # Include bbox to avoid merging different objects at the same time.
@@ -1909,18 +1884,6 @@ def build_unified_identities(
                                 (ei.get("first_ts") or 0) - (ej.get("first_ts") or 0)
                             )
 
-                            # Height check: if bbox heights differ by
-                            # >25%, these are likely different people.
-                            # Raises the merge threshold significantly.
-                            h_i = (ei.get("bbox_y2") or 0) - (ei.get("bbox_y1") or 0)
-                            h_j = (ej.get("bbox_y2") or 0) - (ej.get("bbox_y1") or 0)
-                            height_ratio = (
-                                min(h_i, h_j) / max(h_i, h_j)
-                                if max(h_i, h_j) > 0
-                                else 1.0
-                            )
-                            height_mismatch = height_ratio < 0.65
-
                             # Check clothing description similarity
                             # to allow lower thresholds for long gaps
                             # when the person looks the same.
@@ -1955,21 +1918,18 @@ def build_unified_identities(
                             # Very close (<30s): 0.55 threshold
                             # Close together (<120s): 0.55 threshold
                             # Far apart (>300s): 0.85 normally,
-                            #   but 0.70 if same clothing
-                            # Height mismatch raises threshold by 0.15
+                            #   but 0.68 if same clothing
                             if time_gap <= 30:
                                 thresh = 0.55
                             elif time_gap <= 120:
                                 thresh = 0.55
                             elif same_clothes:
-                                thresh = 0.70
+                                thresh = 0.68
                             elif time_gap >= 300:
                                 thresh = 0.85
                             else:
                                 t = (time_gap - 120) / 180.0
                                 thresh = 0.62 + t * 0.23
-                            if height_mismatch:
-                                thresh = max(thresh, 0.80)
                             # Cross-camera anchor protection:
                             # if BOTH entities already have cross-camera
                             # matches in different groups, require very
@@ -2053,9 +2013,6 @@ def build_unified_identities(
                 )
 
             sightings.sort(key=lambda s: s["first_ts"])
-
-            if not sightings:
-                continue  # all entities in cluster were filtered
 
             cameras_in_cluster = set(s["camera"] for s in sightings)
             matched = len(cameras_in_cluster) > 1
