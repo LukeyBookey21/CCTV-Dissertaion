@@ -416,22 +416,36 @@ def _analyze_frame_quality(
     mean_ssim = float(np.mean(ssim_arr))
     std_ssim = float(np.std(ssim_arr))
 
-    # Detect sudden drops: SSIM < mean - 3*std and below 0.5
-    drop_threshold = max(mean_ssim - 3 * std_ssim, 0.3)
+    # Detect sudden drops using two methods:
+    # 1. Absolute: SSIM < mean - 3*std (catches large drops)
+    # 2. Relative: SSIM deviates > 5*std from mean (catches
+    #    subtle splices in stable CCTV where std is tiny)
+    abs_threshold = max(mean_ssim - 3 * std_ssim, 0.3)
+    # For very stable video (std < 0.005), use a tighter check
+    rel_threshold = mean_ssim - max(5 * std_ssim, 0.01)
     for entry in ssim_timeline:
-        if entry["ssim"] < drop_threshold and entry["ssim"] < 0.5:
+        ssim = entry["ssim"]
+        is_abs_drop = ssim < abs_threshold and ssim < 0.5
+        is_rel_drop = ssim < rel_threshold and std_ssim < 0.005
+        if is_abs_drop or is_rel_drop:
+            deviation = (mean_ssim - ssim) / max(std_ssim, 1e-6)
             flags.append(
                 TamperFlag(
                     category="quality_shift",
-                    severity="critical" if entry["ssim"] < 0.2 else "warning",
-                    confidence=1.0 - entry["ssim"],
+                    severity="critical" if ssim < 0.5 or deviation > 10 else "warning",
+                    confidence=min(deviation / 10.0, 1.0),
                     timestamp_sec=entry["timestamp"],
                     frame_index=entry["frame"],
                     description=(
                         f"Sudden quality drop at {entry['timestamp']:.1f}s "
-                        f"(SSIM={entry['ssim']:.3f}, expected ~{mean_ssim:.3f})"
+                        f"(SSIM={ssim:.4f}, expected ~{mean_ssim:.4f}, "
+                        f"{deviation:.1f} std deviations)"
                     ),
-                    details={"ssim": entry["ssim"], "threshold": drop_threshold},
+                    details={
+                        "ssim": ssim,
+                        "threshold": rel_threshold if is_rel_drop else abs_threshold,
+                        "deviation_sigma": round(deviation, 1),
+                    },
                 )
             )
 
