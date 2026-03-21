@@ -672,12 +672,23 @@ class SingleCameraTracker:
             f"vehicles={len(vehicle_tracks)}"
         )
 
-        # Build summaries for each track
+        # Build summaries for each track — pass video_path so frames
+        # evicted from cache can be re-read from disk (critical for
+        # long videos where cache_limit << total frames).
         persons = self._build_person_summaries(
-            person_tracks, frame_cache, fps, output_dir
+            person_tracks,
+            frame_cache,
+            fps,
+            output_dir,
+            video_path=str(video_path),
         )
         vehicles = self._build_vehicle_summaries(
-            vehicle_tracks, frame_cache, fps, output_dir, plate_conf
+            vehicle_tracks,
+            frame_cache,
+            fps,
+            output_dir,
+            plate_conf,
+            video_path=str(video_path),
         )
 
         # Persist to database
@@ -1067,18 +1078,40 @@ class SingleCameraTracker:
 
         return merged
 
+    @staticmethod
+    def _read_frame(video_path: str, frame_idx: int) -> Optional[np.ndarray]:
+        """Read a single frame from video file (fallback for cache miss)."""
+        cap = cv2.VideoCapture(video_path)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        cap.release()
+        return frame if ret else None
+
+    def _get_frame(
+        self,
+        frame_idx: int,
+        frame_cache: Dict[int, np.ndarray],
+        video_path: Optional[str] = None,
+    ) -> Optional[np.ndarray]:
+        """Get frame from cache, falling back to video file if needed."""
+        frame = frame_cache.get(frame_idx)
+        if frame is None and video_path:
+            frame = self._read_frame(video_path, frame_idx)
+        return frame
+
     def _build_person_summaries(
         self,
         tracks: Dict[int, List[dict]],
         frame_cache: Dict[int, np.ndarray],
         fps: float,
         output_dir: Path,
+        video_path: Optional[str] = None,
     ) -> List[dict]:
         """For each person track, pick the best crop and describe them."""
         summaries = []
         for track_id, dets in sorted(tracks.items()):
             best = max(dets, key=lambda d: d["area"])
-            frame = frame_cache.get(best["frame_idx"])
+            frame = self._get_frame(best["frame_idx"], frame_cache, video_path)
             if frame is None:
                 continue
 
@@ -1098,7 +1131,7 @@ class SingleCameraTracker:
             upper_votes: List[str] = []
             lower_votes: List[str] = []
             for det in top_dets:
-                f = frame_cache.get(det["frame_idx"])
+                f = self._get_frame(det["frame_idx"], frame_cache, video_path)
                 if f is None:
                     continue
                 bx1, by1, bx2, by2 = det["bbox"]
@@ -1204,6 +1237,7 @@ class SingleCameraTracker:
         fps: float,
         output_dir: Path,
         plate_conf: float,
+        video_path: Optional[str] = None,
     ) -> List[dict]:
         """For each vehicle track, pick the best crop and describe colour/plate."""
         summaries = []
@@ -1224,7 +1258,7 @@ class SingleCameraTracker:
                     break
             if best is None:
                 best = max(dets, key=lambda d: d["area"])
-            frame = frame_cache.get(best["frame_idx"])
+            frame = self._get_frame(best["frame_idx"], frame_cache, video_path)
             if frame is None:
                 continue
 
@@ -1690,7 +1724,25 @@ def build_unified_identities(
                         best_wc_sim[eb] = s
 
         # Union cross-camera matched pairs, skipping any match
-        # where either entity has a stronger within-camera partner.
+        # where either entity has a stronger within-camera partner
+        # that belongs to a DIFFERENT identity group.  If the strong
+        # partner is already in the same UF group as the candidate,
+        # it shouldn't block — they're the same person.
+        _wc_best_partner: Dict[int, int] = {}
+        for cam_eids in eids_by_cam.values():
+            for i, ea in enumerate(cam_eids):
+                for eb in cam_eids[i + 1 :]:
+                    if _wc_embs[ea] is None or _wc_embs[eb] is None:
+                        continue
+                    tg = abs(_wc_ts.get(ea, 0) - _wc_ts.get(eb, 0))
+                    if tg > 120:
+                        continue
+                    s = float(np.dot(_wc_embs[ea], _wc_embs[eb]))
+                    if s > best_wc_sim.get(ea, 0):
+                        _wc_best_partner[ea] = eb
+                    if s > best_wc_sim.get(eb, 0):
+                        _wc_best_partner[eb] = ea
+
         for m in match_list:
             eid_a = m["entity_a"]["id"]
             eid_b = m["entity_b"]["id"]
@@ -1698,8 +1750,48 @@ def build_unified_identities(
             wc_a = best_wc_sim.get(eid_a, 0)
             wc_b = best_wc_sim.get(eid_b, 0)
             margin = 0.08
-            if wc_a > cross_sim + margin or wc_b > cross_sim + margin:
+            # Only block if the strong within-camera partner is in
+            # a different group — if partner is already merged with
+            # the candidate, it shouldn't prevent cross-camera linking.
+            block = False
+            if wc_a > cross_sim + margin:
+                partner = _wc_best_partner.get(eid_a)
+                if partner is not None and uf.find(partner) != uf.find(eid_a):
+                    # Don't block if the partner would also match
+                    # the cross-camera entity (they're all the same
+                    # person, just not yet merged).
+                    partner_sim = 0.0
+                    if (
+                        _wc_embs.get(partner) is not None
+                        and _wc_embs.get(eid_b) is not None
+                    ):
+                        partner_sim = float(np.dot(_wc_embs[partner], _wc_embs[eid_b]))
+                    if partner_sim < 0.45:
+                        block = True
+            if wc_b > cross_sim + margin:
+                partner = _wc_best_partner.get(eid_b)
+                if partner is not None and uf.find(partner) != uf.find(eid_b):
+                    partner_sim = 0.0
+                    if (
+                        _wc_embs.get(partner) is not None
+                        and _wc_embs.get(eid_a) is not None
+                    ):
+                        partner_sim = float(np.dot(_wc_embs[partner], _wc_embs[eid_a]))
+                    if partner_sim < 0.45:
+                        block = True
+            if block:
                 continue
+            # Time-proximity gate: cross-camera matches over long
+            # gaps need higher similarity.  A person walking between
+            # cameras takes < 2 minutes.
+            if entity_type == "person":
+                ts_a = _wc_ts.get(eid_a, 0)
+                ts_b = _wc_ts.get(eid_b, 0)
+                cross_gap = abs(ts_a - ts_b)
+                if cross_gap > 600 and cross_sim < 0.70:
+                    continue
+                if cross_gap > 120 and cross_sim < 0.55:
+                    continue
             uf.union(eid_a, eid_b)
 
         # Get all entities of this type, filtering out noise (0-duration singletons)
@@ -1773,7 +1865,9 @@ def build_unified_identities(
                     eid_j, ej = cam_entities[j]
 
                     if entity_type == "vehicle":
-                        # Stationary vehicles: merge by bbox IoU
+                        # Vehicles: merge by bbox IoU (stationary)
+                        # OR by high embedding similarity + same color
+                        # (handles vehicles that move between sightings)
                         bx_i = (
                             ei.get("bbox_x1", 0),
                             ei.get("bbox_y1", 0),
@@ -1795,7 +1889,44 @@ def build_unified_identities(
                         a_j = (bx_j[2] - bx_j[0]) * (bx_j[3] - bx_j[1])
                         union = a_i + a_j - inter
                         iou = inter / union if union > 0 else 0
+                        do_merge = False
                         if iou > 0.5:
+                            do_merge = True
+                        else:
+                            # Fallback: embedding similarity + color
+                            e_i = embs.get(eid_i)
+                            e_j = embs.get(eid_j)
+                            if e_i is not None and e_j is not None:
+                                v_sim = float(np.dot(e_i, e_j))
+                                c_i = (ei.get("color") or "").lower()
+                                c_j = (ej.get("color") or "").lower()
+                                same_color = c_i == c_j and c_i != ""
+                                # Only merge non-overlapping vehicles
+                                # with very high similarity AND some
+                                # spatial proximity (centroid distance).
+                                cx_i = (bx_i[0] + bx_i[2]) / 2
+                                cy_i = (bx_i[1] + bx_i[3]) / 2
+                                cx_j = (bx_j[0] + bx_j[2]) / 2
+                                cy_j = (bx_j[1] + bx_j[3]) / 2
+                                cdist = ((cx_i - cx_j) ** 2 + (cy_i - cy_j) ** 2) ** 0.5
+                                # Close centroids (<200px) + same
+                                # color + high sim + similar size
+                                # = same parked car
+                                area_ratio = (
+                                    min(a_i, a_j) / max(a_i, a_j)
+                                    if max(a_i, a_j) > 0
+                                    else 0
+                                )
+                                if (
+                                    same_color
+                                    and v_sim >= 0.75
+                                    and cdist < 200
+                                    and area_ratio > 0.5
+                                ):
+                                    do_merge = True
+                                elif v_sim >= 0.90:
+                                    do_merge = True
+                        if do_merge:
                             uf.union(eid_i, eid_j)
                     else:
                         # Persons: merge by embedding similarity,
@@ -1814,8 +1945,8 @@ def build_unified_identities(
                             # when the person looks the same.
                             def _color_group(c: str) -> str:
                                 c = c.lower().strip()
-                                if c in ("black", "dark grey", "dark gray"):
-                                    return "dark"
+                                if c in ("dark grey", "dark gray"):
+                                    return "dark_grey"
                                 if c in ("grey", "gray", "light grey"):
                                     return "grey"
                                 if c in ("white", "light"):
@@ -1836,22 +1967,19 @@ def build_unified_identities(
                                 and desc_i[0] != ""
                                 and desc_i[1] != ""
                             )
-                            # Very close (<30s): 0.55 threshold
-                            # Close together (<120s): 0.55 threshold
-                            # Far apart (>300s): 0.85 normally,
-                            #   but 0.62 if same clothing, or 0.70
-                            #   for high-confidence matches
-                            if time_gap <= 30:
+                            # Time-gap scaled thresholds:
+                            #   <=30s:  0.55 (brief occlusion)
+                            #   <=120s: 0.55 (walked off and back)
+                            #   120-600s same clothes: 0.62
+                            #   120-600s diff clothes: 0.65
+                            #   >600s same clothes: 0.68
+                            #   >600s diff clothes: 0.78
+                            if time_gap <= 120:
                                 thresh = 0.55
-                            elif time_gap <= 120:
-                                thresh = 0.55
-                            elif same_clothes:
-                                thresh = 0.68
-                            elif time_gap >= 300:
-                                thresh = 0.80
+                            elif time_gap <= 600:
+                                thresh = 0.62 if same_clothes else 0.78
                             else:
-                                t = (time_gap - 120) / 180.0
-                                thresh = 0.62 + t * 0.23
+                                thresh = 0.68 if same_clothes else 0.80
                             # Cross-camera anchor protection:
                             # if BOTH entities already have cross-camera
                             # matches in different groups, require very

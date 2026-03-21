@@ -37,6 +37,70 @@ TRACKED_OUTPUT = PROJECT_ROOT / "data" / "tracked_output"
 CLIPS_DIR = PROJECT_ROOT / "data" / "clips"
 
 
+# ── Session management helpers ────────────────────────────────────
+
+
+def _clear_session_data() -> None:
+    """Wipe all tracking artifacts so the app starts clean."""
+    if TRACKER_DB.exists():
+        try:
+            TRACKER_DB.unlink()
+        except OSError:
+            pass
+    for d in (TRACKED_OUTPUT, CLIPS_DIR):
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True, exist_ok=True)
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _build_session_zip() -> bytes:
+    """Return a ZIP of tracker.db + crop images (no videos) as raw bytes."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    _image_exts = {".jpg", ".jpeg", ".png"}
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if TRACKER_DB.exists():
+            zf.write(TRACKER_DB, "tracker.db")
+        if TRACKED_OUTPUT.exists():
+            for f in TRACKED_OUTPUT.rglob("*"):
+                if f.is_file() and f.suffix.lower() in _image_exts:
+                    zf.write(f, f.relative_to(PROJECT_ROOT / "data"))
+    buf.seek(0)
+    return buf.read()
+
+
+def _restore_session_zip(zip_bytes: bytes) -> str:
+    """Extract a session ZIP and restore DB + crops.
+
+    Returns an empty string on success, or an error message string.
+    """
+    import io
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            names = zf.namelist()
+            if "tracker.db" not in names:
+                return "Invalid session file — tracker.db not found inside the ZIP."
+            # Wipe existing artifacts before restoring
+            if TRACKED_OUTPUT.exists():
+                shutil.rmtree(TRACKED_OUTPUT, ignore_errors=True)
+            TRACKED_OUTPUT.mkdir(parents=True, exist_ok=True)
+            for name in names:
+                target = PROJECT_ROOT / "data" / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(name) as src, open(target, "wb") as dst:
+                    dst.write(src.read())
+    except zipfile.BadZipFile:
+        return "The uploaded file is not a valid ZIP archive."
+    except Exception as exc:
+        return f"Failed to restore session: {exc}"
+    return ""
+
+
 # ── Database query helpers ────────────────────────────────────────
 
 
@@ -196,13 +260,14 @@ def _get_unified_identities(cam_a: str, cam_b: str) -> dict:
 
     from cctv_dissertation.tracker import build_unified_identities
 
-    result = build_unified_identities(
-        str(TRACKER_DB),
-        cam_a,
-        cam_b,
-        person_threshold=0.45,
-        vehicle_threshold=0.80,
-    )
+    with st.spinner("Matching identities across cameras — this may take a moment..."):
+        result = build_unified_identities(
+            str(TRACKER_DB),
+            cam_a,
+            cam_b,
+            person_threshold=0.45,
+            vehicle_threshold=0.80,
+        )
     st.session_state[cache_key] = result
     st.session_state[cam_key] = (cam_a, cam_b)
     st.session_state[mtime_key] = db_mtime
@@ -2402,7 +2467,7 @@ def page_tamper_detection(cameras: List[str]) -> None:
     st.header("Video Tamper Detection")
     st.caption(
         "Automatic analysis for signs of tampering: frame drops, "
-        "splices, re-encoding artefacts, and timestamp anomalies. "
+        "splices, re-encoding artifacts, and timestamp anomalies. "
         "Results are generated when videos are processed."
     )
 
@@ -2889,7 +2954,7 @@ def page_detections(selected_file, db_path: str) -> None:
 # ── Upload handlers ───────────────────────────────────────────────
 
 
-def handle_single_upload(uploaded_file) -> None:
+def handle_single_upload(uploaded_file, camera_label: str = "") -> None:
     """Process a single video with ByteTrack tracking."""
     import uuid
 
@@ -2897,7 +2962,7 @@ def handle_single_upload(uploaded_file) -> None:
     target = UPLOADS_DIR / uploaded_file.name
     target.write_bytes(uploaded_file.getbuffer())
 
-    camera_label = target.stem
+    camera_label = camera_label.strip() or target.stem
     run_id = str(uuid.uuid4())[:12]
 
     # Ingest for chain-of-custody
@@ -3015,7 +3080,9 @@ def handle_single_upload(uploaded_file) -> None:
     st.rerun()
 
 
-def handle_cross_upload(file_a, file_b) -> None:
+def handle_cross_upload(
+    file_a, file_b, cam_a_label: str = "", cam_b_label: str = ""
+) -> None:
     """Process two videos for cross-camera tracking."""
     import uuid
 
@@ -3026,8 +3093,8 @@ def handle_cross_upload(file_a, file_b) -> None:
     target_a.write_bytes(file_a.getbuffer())
     target_b.write_bytes(file_b.getbuffer())
 
-    cam_a = target_a.stem
-    cam_b = target_b.stem
+    cam_a = cam_a_label.strip() or target_a.stem
+    cam_b = cam_b_label.strip() or target_b.stem
 
     # Generate a unique run_id for this processing session
     run_id = str(uuid.uuid4())[:12]
@@ -3255,81 +3322,235 @@ def handle_cross_upload(file_a, file_b) -> None:
 
 def main() -> None:
     st.set_page_config(
-        page_title="Forensic Video Toolkit",
+        page_title="Forensic CCTV Intelligence",
         layout="wide",
+        initial_sidebar_state="expanded",
     )
-    st.title("Forensic Video Analysis Dashboard")
 
-    # ── Sidebar: upload mode ──
+    # ── Session init: preserve existing data across browser sessions ──────────
+    if "session_initialized" not in st.session_state:
+        st.session_state["session_initialized"] = True
+        # Check if DB already has tracked data from a previous processing run
+        has_data = False
+        if TRACKER_DB.exists():
+            try:
+                import sqlite3 as _sqlite3
+
+                with _sqlite3.connect(str(TRACKER_DB)) as _c:
+                    (_n,) = _c.execute(
+                        "SELECT COUNT(*) FROM tracked_entities"
+                    ).fetchone()
+                    has_data = _n > 0
+            except Exception:
+                pass
+        st.session_state["session_status"] = "active" if has_data else "fresh"
+
+    # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
-        st.header("Upload Mode")
+        st.markdown("## Forensic CCTV Intelligence")
+
+        # ── Session status & controls ──────────────────────────────────────
+        status = st.session_state.get("session_status", "fresh")
+        _status_colors = {"fresh": "🔵", "active": "🟢", "loaded": "🟠"}
+        _status_labels = {
+            "fresh": "Fresh session — no data loaded",
+            "active": "Active session — analysis in progress",
+            "loaded": "Session restored from file",
+        }
+        st.caption(
+            f"{_status_colors.get(status, '🔵')} {_status_labels.get(status, '')}"
+        )
+
+        st.divider()
+
+        # Save session button (only useful when data exists)
+        _has_data = TRACKER_DB.exists() and TRACKER_DB.stat().st_size > 8192
+        if _has_data:
+            from datetime import datetime
+
+            _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            _zip_name = f"cctv_session_{_ts}.zip"
+            try:
+                _zip_bytes = _build_session_zip()
+                st.download_button(
+                    label="Save Session",
+                    data=_zip_bytes,
+                    file_name=_zip_name,
+                    mime="application/zip",
+                    use_container_width=True,
+                    help="Download session snapshot. Re-upload to restore instantly.",
+                )
+            except Exception as _e:
+                st.error(f"Could not build session file: {_e}")
+        else:
+            st.button(
+                "Save Session",
+                disabled=True,
+                use_container_width=True,
+                help="Process a video first to enable saving.",
+            )
+
+        # Load session uploader
+        with st.expander("Load Previous Session", expanded=not _has_data):
+            st.caption(
+                "Upload a .zip saved from a previous session to restore it "
+                "instantly — no reprocessing needed."
+            )
+            _session_file = st.file_uploader(
+                "Session file (.zip)",
+                type=["zip"],
+                key="session_zip_upload",
+                label_visibility="collapsed",
+            )
+            if _session_file is not None:
+                if st.button(
+                    "Restore Session",
+                    use_container_width=True,
+                    type="primary",
+                    key="restore_btn",
+                ):
+                    with st.spinner("Restoring session..."):
+                        _err = _restore_session_zip(_session_file.getvalue())
+                    if _err:
+                        st.error(_err)
+                    else:
+                        # Clear analysis state so the UI re-reads from restored DB
+                        for _k in [
+                            "upload_mode",
+                            "active_camera",
+                            "cross_cam_a",
+                            "cross_cam_b",
+                            "current_run_id",
+                            "unified_identities_cache",
+                        ]:
+                            st.session_state.pop(_k, None)
+                        st.session_state["session_status"] = "loaded"
+                        st.success("Session restored.")
+                        st.rerun()
+
+        st.divider()
+
+        # ── Analysis mode ──────────────────────────────────────────────────
+        st.subheader("Analysis Mode")
         mode = st.radio(
             "Select mode",
             ["Single Camera", "Cross-Camera (2 videos)"],
             key="mode_radio",
             horizontal=False,
+            label_visibility="collapsed",
         )
 
         st.divider()
 
+        # ── Upload section ─────────────────────────────────────────────────
         if mode == "Single Camera":
             st.subheader("Upload Video")
+            st.caption(
+                "Accepts merged MP4/AVI/MOV/MKV. Use the DVR merger script "
+                "to combine per-minute files before uploading."
+            )
             uploaded = st.file_uploader(
-                "Select video file",
+                "Video file",
                 type=["mp4", "avi", "mov", "mkv"],
                 key="single_upload",
+                label_visibility="collapsed",
             )
+            if uploaded:
+                _default_label = Path(uploaded.name).stem
+                cam_label_in = st.text_input(
+                    "Camera label (optional)",
+                    value=_default_label,
+                    key="single_cam_label",
+                    help="Stored in the database. Defaults to the filename.",
+                )
+            else:
+                cam_label_in = ""
             if st.button(
-                "Process video",
+                "Run Analysis",
                 disabled=uploaded is None,
                 use_container_width=True,
                 type="primary",
             ):
-                if uploaded:
-                    handle_single_upload(uploaded)
+                st.session_state["session_status"] = "active"
+                handle_single_upload(uploaded, camera_label=cam_label_in)
 
         else:
             st.subheader("Upload Two Videos")
+            st.caption(
+                "Camera A = first in the movement path (e.g. garage). "
+                "Camera B = second (e.g. garden)."
+            )
             file_a = st.file_uploader(
-                "Camera A video",
+                "Camera A",
                 type=["mp4", "avi", "mov", "mkv"],
                 key="cross_upload_a",
             )
+            if file_a:
+                _default_a = Path(file_a.name).stem
+                cam_a_label_in = st.text_input(
+                    "Camera A label",
+                    value=_default_a,
+                    key="cross_label_a",
+                    help="e.g. Garage, Front Door",
+                )
+            else:
+                cam_a_label_in = ""
+
             file_b = st.file_uploader(
-                "Camera B video",
+                "Camera B",
                 type=["mp4", "avi", "mov", "mkv"],
                 key="cross_upload_b",
             )
+            if file_b:
+                _default_b = Path(file_b.name).stem
+                cam_b_label_in = st.text_input(
+                    "Camera B label",
+                    value=_default_b,
+                    key="cross_label_b",
+                    help="e.g. Garden, Driveway",
+                )
+            else:
+                cam_b_label_in = ""
+
             if st.button(
-                "Process both videos",
+                "Run Analysis",
                 disabled=(file_a is None or file_b is None),
                 use_container_width=True,
                 type="primary",
             ):
-                if file_a and file_b:
-                    handle_cross_upload(file_a, file_b)
+                st.session_state["session_status"] = "active"
+                handle_cross_upload(
+                    file_a,
+                    file_b,
+                    cam_a_label=cam_a_label_in,
+                    cam_b_label=cam_b_label_in,
+                )
 
-        # Show existing cameras from DB
-        st.divider()
+        # ── Processed cameras in current session ───────────────────────────
         cameras = _query_cameras(TRACKER_DB)
         if cameras:
-            st.subheader("Processed Cameras")
+            st.divider()
+            st.subheader("Cameras in Session")
             for cam in cameras:
                 entities = _query_tracked_entities(TRACKER_DB, cam)
                 persons = sum(1 for e in entities if e["entity_type"] == "person")
                 vehicles = sum(1 for e in entities if e["entity_type"] == "vehicle")
-                st.caption(f"{cam}: {persons}P / {vehicles}V")
+                st.caption(f"**{cam}** — {persons} persons, {vehicles} vehicles")
 
-            st.subheader("Quick Switch")
             if len(cameras) >= 2:
+                st.markdown("**Switch view**")
                 sel_a = st.selectbox("Camera A", cameras, index=0, key="qs_cam_a")
                 sel_b = st.selectbox(
-                    "Camera B", cameras, index=min(1, len(cameras) - 1), key="qs_cam_b"
+                    "Camera B",
+                    cameras,
+                    index=min(1, len(cameras) - 1),
+                    key="qs_cam_b",
                 )
                 if st.button(
-                    "Cross-camera view",
+                    "Cross-Camera View",
                     use_container_width=True,
                     key="switch_cross",
+                    type="primary",
                 ):
                     st.session_state["cross_cam_a"] = sel_a
                     st.session_state["cross_cam_b"] = sel_b
@@ -3337,7 +3558,7 @@ def main() -> None:
                     st.rerun()
             for cam in cameras:
                 if st.button(
-                    f"Single: {cam}",
+                    f"Single view: {cam}",
                     use_container_width=True,
                     key=f"switch_{cam}",
                 ):
@@ -3345,11 +3566,11 @@ def main() -> None:
                     st.session_state["upload_mode"] = "single"
                     st.rerun()
 
-        # Legacy detection report selector
-        st.divider()
+        # Legacy detection reports (kept for backwards compatibility)
         detection_files = list_detection_files()
         if detection_files:
-            st.subheader("Detection Reports")
+            st.divider()
+            st.caption("Legacy Detection Reports")
             selected_det = st.selectbox(
                 "Report",
                 detection_files,
@@ -3359,33 +3580,34 @@ def main() -> None:
         else:
             selected_det = None
 
-    # ── Main content area ──
+    # ── Main content area ─────────────────────────────────────────────────────
     upload_mode = st.session_state.get("upload_mode", "")
 
     if upload_mode == "single":
         camera = st.session_state.get("active_camera", "")
         if camera:
+            st.title(f"Analysis — {camera}")
             (
-                tab_track,
                 tab_summary,
+                tab_track,
                 tab_search,
                 tab_poi,
                 tab_tamper,
                 tab_detect,
             ) = st.tabs(
                 [
-                    "Tracking",
                     "Summary",
+                    "Tracking",
                     "Search",
                     "Person of Interest",
                     "Tamper Detection",
                     "Detections",
                 ]
             )
-            with tab_track:
-                page_single_tracking(camera)
             with tab_summary:
                 page_single_summary(camera)
+            with tab_track:
+                page_single_tracking(camera)
             with tab_search:
                 page_search([camera])
             with tab_poi:
@@ -3395,16 +3617,17 @@ def main() -> None:
             with tab_detect:
                 page_detections(selected_det, str(DEFAULT_DB_PATH))
         else:
-            st.info("Upload a video to get started.")
+            st.info("Select a camera from the sidebar to view its analysis.")
 
     elif upload_mode == "cross":
         cam_a = st.session_state.get("cross_cam_a", "")
         cam_b = st.session_state.get("cross_cam_b", "")
         if cam_a and cam_b:
+            st.title(f"Cross-Camera Analysis — {cam_a} / {cam_b}")
             (
-                tab_dual,
                 tab_id,
                 tab_timeline,
+                tab_dual,
                 tab_search,
                 tab_poi,
                 tab_tamper,
@@ -3413,9 +3636,9 @@ def main() -> None:
                 tab_sum_b,
             ) = st.tabs(
                 [
-                    "Dual View",
                     "Identity Deep Dive",
                     "Timeline",
+                    "Dual View",
                     "Search",
                     "Person of Interest",
                     "Tamper Detection",
@@ -3424,12 +3647,12 @@ def main() -> None:
                     f"Summary: {cam_b}",
                 ]
             )
-            with tab_dual:
-                page_cross_dual_view(cam_a, cam_b)
             with tab_id:
                 page_cross_identity(cam_a, cam_b)
             with tab_timeline:
                 page_cross_timeline(cam_a, cam_b)
+            with tab_dual:
+                page_cross_dual_view(cam_a, cam_b)
             with tab_search:
                 page_search([cam_a, cam_b])
             with tab_poi:
@@ -3443,43 +3666,74 @@ def main() -> None:
             with tab_sum_b:
                 page_single_summary(cam_b)
         else:
-            st.info("Upload two videos to enable cross-camera analysis.")
+            st.info(
+                "Select two cameras from the sidebar to enable cross-camera analysis."
+            )
+
     else:
-        # Default view — show existing data or prompt to upload
-        _rid = st.session_state.get("current_run_id")
-        cameras = _query_cameras(TRACKER_DB, run_id=_rid)
-        if not cameras:
-            # Fallback: load most recent run_id from DB
-            if TRACKER_DB.exists():
-                _conn = sqlite3.connect(str(TRACKER_DB))
-                _row = _conn.execute(
-                    "SELECT run_id FROM tracked_entities "
-                    "WHERE run_id IS NOT NULL "
-                    "ORDER BY created_at DESC LIMIT 1"
-                ).fetchone()
-                _conn.close()
-                if _row:
-                    st.session_state["current_run_id"] = _row[0]
-                    cameras = _query_cameras(TRACKER_DB, run_id=_row[0])
-            if not cameras:
-                cameras = _query_cameras(TRACKER_DB)
-        if cameras:
-            if len(cameras) >= 2:
-                # Auto-load cross-camera view
-                st.session_state["cross_cam_a"] = cameras[0]
-                st.session_state["cross_cam_b"] = cameras[1]
+        # ── Landing page / auto-restore ───────────────────────────────────
+        cameras_in_db = _query_cameras(TRACKER_DB)
+
+        if cameras_in_db:
+            # Data exists (restored session) — auto-navigate to analysis view
+            if len(cameras_in_db) >= 2:
+                st.session_state["cross_cam_a"] = cameras_in_db[0]
+                st.session_state["cross_cam_b"] = cameras_in_db[1]
                 st.session_state["upload_mode"] = "cross"
                 st.rerun()
-            elif len(cameras) == 1:
-                st.session_state["active_camera"] = cameras[0]
+            else:
+                st.session_state["active_camera"] = cameras_in_db[0]
                 st.session_state["upload_mode"] = "single"
                 st.rerun()
-        elif detection_files:
-            tab_detect = st.tabs(["Detections"])[0]
-            with tab_detect:
-                page_detections(selected_det, str(DEFAULT_DB_PATH))
+
         else:
-            st.info("Upload a video using the sidebar to begin analysis.")
+            # Fresh session landing page
+            st.title("Forensic CCTV Intelligence")
+            st.markdown(
+                "Automated movement tracking, identity matching, and forensic "
+                "reporting across multiple camera feeds."
+            )
+            st.divider()
+
+            col_new, col_load = st.columns(2, gap="large")
+
+            with col_new:
+                st.markdown("### New Analysis")
+                st.markdown(
+                    "Upload one or two merged video files using the sidebar. "
+                    "The system will automatically:\n\n"
+                    "- Detect and track all persons and vehicles\n"
+                    "- Build cross-camera identity matches\n"
+                    "- Extract timestamps and movement timelines\n"
+                    "- Run tamper detection on the footage\n"
+                    "- Generate a court-ready evidence package"
+                )
+                st.info(
+                    "Use the **DVR merger script** to combine per-minute files "
+                    "into a single video before uploading.",
+                    icon="ℹ️",
+                )
+
+            with col_load:
+                st.markdown("### Restore a Session")
+                st.markdown(
+                    "Have a previously saved session file? Upload it using "
+                    "**Load Previous Session** in the sidebar to restore all "
+                    "tracked entities, identities, and analysis results "
+                    "instantly — no reprocessing required."
+                )
+                st.success(
+                    "Session files (.zip) contain the full tracking database "
+                    "and all crop images. Original video files are not required "
+                    "to restore a session.",
+                    icon="✅",
+                )
+
+            st.divider()
+            st.caption(
+                "Forensic CCTV Intelligence — "
+                "ByteTrack · OSNet Re-ID · YOLOv8 · EasyOCR"
+            )
 
 
 if __name__ == "__main__":
