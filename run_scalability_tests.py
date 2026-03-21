@@ -1,6 +1,6 @@
 """Run scalability tests across multiple video durations.
 
-Extracts 1h, 3h, 5h, 8h clips from the merged DVR videos,
+Extracts 1h, 3h, 5h, 8h clips from the merged DVR videos (11h uses full video),
 processes each independently, and saves results + metrics
 to separate directories for side-by-side comparison.
 
@@ -40,6 +40,12 @@ DURATIONS = {
     "3h": "03:00:00",
     "5h": "05:00:00",
     "8h": "08:00:00",
+    "11h": None,  # None = use full merged video, no extraction
+}
+
+# To test with a quick 2-min run, use:  python run_scalability_tests.py --test
+TEST_DURATIONS = {
+    "2min": "00:02:00",
 }
 
 STRIDE = 10
@@ -136,25 +142,32 @@ def run_camera(
     )
 
 
-def run_duration_test(label: str, duration: str):
+def run_duration_test(label: str, duration):
     """Run a complete test for one duration."""
+    dur_str = duration if duration else "full video"
     print(f"\n{'='*60}")
-    print(f"SCALABILITY TEST: {label} ({duration})")
+    print(f"SCALABILITY TEST: {label} ({dur_str})")
     print(f"{'='*60}")
 
     test_dir = BASE_DIR / label
     test_dir.mkdir(parents=True, exist_ok=True)
 
-    clips_dir = test_dir / "clips"
-    clips_dir.mkdir(exist_ok=True)
+    if duration is None:
+        # Use full merged videos directly
+        garage_clip = GARAGE_FULL
+        garden_clip = GARDEN_FULL
+        print("\nStep 1: Using full merged videos (no extraction)")
+    else:
+        clips_dir = test_dir / "clips"
+        clips_dir.mkdir(exist_ok=True)
 
-    garage_clip = clips_dir / "garage.mp4"
-    garden_clip = clips_dir / "garden.mp4"
+        garage_clip = clips_dir / "garage.mp4"
+        garden_clip = clips_dir / "garden.mp4"
 
-    # Step 1: Extract clips
-    print("\nStep 1: Extracting clips...")
-    extract_clip(GARAGE_FULL, garage_clip, duration)
-    extract_clip(GARDEN_FULL, garden_clip, duration)
+        # Step 1: Extract clips
+        print("\nStep 1: Extracting clips...")
+        extract_clip(GARAGE_FULL, garage_clip, duration)
+        extract_clip(GARDEN_FULL, garden_clip, duration)
 
     # Step 2: Process
     print("\nStep 2: Processing...")
@@ -253,7 +266,10 @@ if __name__ == "__main__":
     BASE_DIR.mkdir(parents=True, exist_ok=True)
     all_results = {}
 
-    for label, duration in DURATIONS.items():
+    # Use --test flag for quick 2-min verification run
+    durations = TEST_DURATIONS if "--test" in sys.argv else DURATIONS
+
+    for label, duration in durations.items():
         result = run_duration_test(label, duration)
         all_results[label] = result
 
