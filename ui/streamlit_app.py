@@ -32,8 +32,8 @@ from cctv_dissertation.storage import (  # noqa: E402
 DETECTIONS_DIR = Path("data/detections")
 UPLOADS_DIR = Path("data/uploads")
 PREVIEWS_DIR = Path("data/previews")
-TRACKER_DB = PROJECT_ROOT / "data" / "tracker.db"
-TRACKED_OUTPUT = PROJECT_ROOT / "data" / "tracked_output"
+TRACKER_DB = PROJECT_ROOT / "data" / "scalability_tests" / "11h" / "tracker.db"
+TRACKED_OUTPUT = PROJECT_ROOT / "data" / "scalability_tests" / "11h" / "tracked_output"
 CLIPS_DIR = PROJECT_ROOT / "data" / "clips"
 
 
@@ -204,6 +204,7 @@ def _search_entities(
     return [dict(r) for r in rows]
 
 
+@st.cache_data(show_spinner=False, max_entries=200)
 def _load_image(path_str: str) -> Optional[np.ndarray]:
     p = Path(path_str)
     if not p.is_absolute():
@@ -245,15 +246,20 @@ def _get_unified_identities(cam_a: str, cam_b: str) -> dict:
     cache_key = "unified_identities_cache"
     cam_key = "unified_identities_cameras"
     mtime_key = "unified_identities_mtime"
+    code_mtime_key = "unified_identities_code_mtime"
 
     # Invalidate cache when DB file changes (re-processing, code changes)
     db_mtime = TRACKER_DB.stat().st_mtime if TRACKER_DB.exists() else 0
+    tracker_py = PROJECT_ROOT / "src" / "cctv_dissertation" / "tracker.py"
+    code_mtime = tracker_py.stat().st_mtime if tracker_py.exists() else 0
     cached_cams = st.session_state.get(cam_key)
     cached_mtime = st.session_state.get(mtime_key)
+    cached_code_mtime = st.session_state.get(code_mtime_key)
 
     if (
         cached_cams == (cam_a, cam_b)
         and cached_mtime == db_mtime
+        and cached_code_mtime == code_mtime
         and cache_key in st.session_state
     ):
         return st.session_state[cache_key]
@@ -265,13 +271,219 @@ def _get_unified_identities(cam_a: str, cam_b: str) -> dict:
             str(TRACKER_DB),
             cam_a,
             cam_b,
-            person_threshold=0.45,
-            vehicle_threshold=0.80,
         )
     st.session_state[cache_key] = result
     st.session_state[cam_key] = (cam_a, cam_b)
     st.session_state[mtime_key] = db_mtime
+    st.session_state[code_mtime_key] = code_mtime
     return result
+
+
+# ── Manual adjustment helpers ────────────────────────────────────
+
+
+def _get_adjusted_identities(cam_a: str, cam_b: str) -> dict:
+    """Get unified identities with manual adjustments applied (cached per rerun)."""
+    adj_count = len(st.session_state.get("manual_adjustments", []))
+    cache_key = "_adjusted_identities_cache"
+    count_key = "_adjusted_identities_adj_count"
+    if (
+        cache_key in st.session_state
+        and st.session_state.get(count_key) == adj_count
+    ):
+        return st.session_state[cache_key]
+    raw = _get_unified_identities(cam_a, cam_b)
+    result = _apply_manual_adjustments(raw)
+    st.session_state[cache_key] = result
+    st.session_state[count_key] = adj_count
+    return result
+
+
+def _renumber_identities(result: dict) -> None:
+    """Re-number unified_ids sequentially after each adjustment."""
+    for entity_type in ["persons", "vehicles"]:
+        items = result.get(entity_type, [])
+        items.sort(key=lambda x: x["sightings"][0]["first_ts"])
+        old_to_new = {}
+        for i, item in enumerate(items, 1):
+            old_to_new[item["unified_id"]] = i
+            item["unified_id"] = i
+        # Update journey references
+        key = "person_id" if entity_type == "persons" else "vehicle_id"
+        for j in result.get("journeys", []):
+            old_id = j.get(key)
+            if old_id in old_to_new:
+                j[key] = old_to_new[old_id]
+
+
+def _apply_manual_adjustments(identities: dict) -> dict:
+    """Return a deep copy of identities with manual adjustments applied."""
+    import copy
+
+    adjustments = st.session_state.get("manual_adjustments", [])
+    if not adjustments:
+        return identities
+
+    result = copy.deepcopy(identities)
+
+    for i, adj in enumerate(adjustments):
+        if adj["action"] == "merge":
+            _apply_merge(result, adj)
+        elif adj["action"] == "split":
+            _apply_split(result, adj)
+        elif adj["action"] == "add_journey":
+            _apply_add_journey(result, adj)
+        elif adj["action"] == "remove_journey":
+            _apply_remove_journey(result, adj)
+
+        # Renumber at batch boundaries only — items in the same batch
+        # share an ID space (queued against the same displayed state).
+        curr_batch = adj.get("batch_id")
+        next_batch = (
+            adjustments[i + 1].get("batch_id")
+            if i + 1 < len(adjustments)
+            else None
+        )
+        if curr_batch is None or curr_batch != next_batch:
+            _renumber_identities(result)
+
+    return result
+
+
+def _apply_merge(result: dict, adj: dict) -> None:
+    key = "persons" if adj["entity_type"] == "person" else "vehicles"
+    items = result[key]
+    src_ids = adj["source_ids"]
+    target_id = adj["target_id"]
+    other_id = [i for i in src_ids if i != target_id][0]
+
+    target = None
+    other = None
+    for item in items:
+        if item["unified_id"] == target_id:
+            target = item
+        elif item["unified_id"] == other_id:
+            other = item
+
+    if not target or not other:
+        return
+
+    target["sightings"].extend(other["sightings"])
+    target["sightings"].sort(key=lambda x: x["first_ts"])
+    target["raw_sightings"] = target.get("raw_sightings", []) + other.get(
+        "raw_sightings", []
+    )
+    target["raw_sightings"].sort(key=lambda x: x["first_ts"])
+
+    cams = set(s["camera"] for s in target["sightings"])
+    target["matched"] = len(cams) > 1
+    target["_manually_merged"] = True
+
+    # Update journeys referencing the absorbed identity
+    for j in result.get("journeys", []):
+        if adj["entity_type"] == "person" and j.get("person_id") == other_id:
+            j["person_id"] = target_id
+        elif adj["entity_type"] == "vehicle" and j.get("vehicle_id") == other_id:
+            j["vehicle_id"] = target_id
+
+    items.remove(other)
+
+
+def _apply_split(result: dict, adj: dict) -> None:
+    key = "persons" if adj["entity_type"] == "person" else "vehicles"
+    items = result[key]
+
+    source = None
+    for item in items:
+        if item["unified_id"] == adj["source_id"]:
+            source = item
+            break
+    if not source:
+        return
+
+    split_eids = set(adj.get("entity_ids_to_split", []))
+    keep_sightings = []
+    split_sightings = []
+    keep_raw = []
+    split_raw = []
+
+    for s in source["sightings"]:
+        if s.get("entity_id") in split_eids:
+            split_sightings.append(s)
+        else:
+            keep_sightings.append(s)
+
+    for s in source.get("raw_sightings", []):
+        if s.get("entity_id") in split_eids:
+            split_raw.append(s)
+        else:
+            keep_raw.append(s)
+
+    if not split_sightings or not keep_sightings:
+        return
+
+    source["sightings"] = keep_sightings
+    source["raw_sightings"] = keep_raw
+    cams = set(s["camera"] for s in keep_sightings)
+    source["matched"] = len(cams) > 1
+
+    new_id = max(i["unified_id"] for i in items) + 1
+    new_identity = {
+        "unified_id": new_id,
+        "sightings": split_sightings,
+        "raw_sightings": split_raw,
+        "matched": len(set(s["camera"] for s in split_sightings)) > 1,
+        "similarity": None,
+        "_manually_split": True,
+    }
+    items.append(new_identity)
+
+
+def _apply_add_journey(result: dict, adj: dict) -> None:
+    journeys = result.setdefault("journeys", [])
+    journeys.append(
+        {
+            "person_id": adj["person_id"],
+            "vehicle_id": adj["vehicle_id"],
+            "event": adj["event_type"],
+            "vehicle_desc": adj.get("vehicle_desc", ""),
+            "person_desc": adj.get("person_desc", ""),
+            "timestamp": 0,
+            "person_ts": 0,
+            "gap_seconds": 0,
+            "confidence": 1.0,
+            "camera": "",
+            "_manual": True,
+        }
+    )
+
+
+def _apply_remove_journey(result: dict, adj: dict) -> None:
+    journeys = result.get("journeys", [])
+    idx = adj.get("journey_index")
+    fp = adj.get("journey_fingerprint")
+
+    # Try index first, verify with fingerprint if available
+    if idx is not None and 0 <= idx < len(journeys):
+        j = journeys[idx]
+        if fp is None or (
+            j.get("person_id") == fp.get("person_id")
+            and j.get("vehicle_id") == fp.get("vehicle_id")
+            and j.get("event") == fp.get("event")
+        ):
+            journeys.pop(idx)
+            return
+
+    # Fallback: search by fingerprint
+    if fp:
+        for i, j in enumerate(journeys):
+            if (
+                j.get("person_id") == fp.get("person_id")
+                and j.get("vehicle_id") == fp.get("vehicle_id")
+                and j.get("event") == fp.get("event")
+            ):
+                journeys.pop(i)
+                return
 
 
 # ── Single-camera pages ──────────────────────────────────────────
@@ -627,7 +839,7 @@ def page_cross_identity(cam_a: str, cam_b: str) -> None:
 
     from cctv_dissertation.tracker import generate_cross_camera_clip
 
-    identities = _get_unified_identities(cam_a, cam_b)
+    identities = _get_adjusted_identities(cam_a, cam_b)
 
     persons = identities["persons"]
     vehicles = identities["vehicles"]
@@ -655,20 +867,31 @@ def page_cross_identity(cam_a: str, cam_b: str) -> None:
     video_a = video_a[0] if video_a else None
     video_b = video_b[0] if video_b else None
 
-    pdf_bytes = _generate_forensic_pdf(
-        identities,
-        cam_a,
-        cam_b,
-        start_time_a,
-        start_time_b,
-        date_a,
-        date_b,
-        video_a,
-        video_b,
-    )
+    # Cache PDF bytes so download button survives reruns
+    adj_count = len(st.session_state.get("manual_adjustments", []))
+    pdf_cache_key = "_forensic_pdf_cache"
+    pdf_adj_key = "_forensic_pdf_adj_count"
+    if (
+        pdf_cache_key not in st.session_state
+        or st.session_state.get(pdf_adj_key) != adj_count
+    ):
+        with st.spinner("Generating forensic report..."):
+            st.session_state[pdf_cache_key] = _generate_forensic_pdf(
+                identities,
+                cam_a,
+                cam_b,
+                start_time_a,
+                start_time_b,
+                date_a,
+                date_b,
+                video_a,
+                video_b,
+            )
+            st.session_state[pdf_adj_key] = adj_count
+
     st.download_button(
         label="Download Forensic Report (PDF)",
-        data=pdf_bytes,
+        data=st.session_state[pdf_cache_key],
         file_name="forensic_report.pdf",
         mime="application/pdf",
         type="primary",
@@ -875,6 +1098,542 @@ def page_cross_identity(cam_a: str, cam_b: str) -> None:
     _journey_section(identities, cam_a, cam_b)
 
 
+@st.fragment
+def page_manual_adjustments(cam_a: str, cam_b: str) -> None:
+    """Manual identity adjustments — batch queue, then save all at once."""
+    from datetime import datetime
+    import time as _time
+
+    st.header("Manual Adjustments")
+    st.caption(
+        "Queue merges, splits, and journey edits below. "
+        "Nothing is applied until you press **Save All Changes**."
+    )
+
+    if "manual_adjustments" not in st.session_state:
+        st.session_state["manual_adjustments"] = []
+    if "pending_adjustments" not in st.session_state:
+        st.session_state["pending_adjustments"] = []
+    if "adjustment_batch_counter" not in st.session_state:
+        st.session_state["adjustment_batch_counter"] = 0
+
+    identities = _get_adjusted_identities(cam_a, cam_b)
+    persons = identities.get("persons", [])
+    vehicles = identities.get("vehicles", [])
+    journeys = identities.get("journeys", [])
+
+    pending = st.session_state["pending_adjustments"]
+
+    # ── Pending Changes Banner ──
+    if pending:
+        st.warning(
+            f"**{len(pending)} pending change(s)** — "
+            "scroll to bottom to Save or Discard."
+        )
+
+    # ── Build pending lookup for visual badges ──
+    _pending_person_ids: set = set()
+    _pending_vehicle_ids: set = set()
+    for _pa in pending:
+        if _pa["action"] == "merge":
+            _ids = set(_pa.get("source_ids", []))
+            if _pa["entity_type"] == "person":
+                _pending_person_ids |= _ids
+            else:
+                _pending_vehicle_ids |= _ids
+        elif _pa["action"] == "split":
+            _sid = _pa.get("source_id")
+            if _pa["entity_type"] == "person":
+                _pending_person_ids.add(_sid)
+            else:
+                _pending_vehicle_ids.add(_sid)
+
+    # ── Helper: render identity card inside a form ──
+    def _render_identity_card(item, entity_type, card_key):
+        uid = item["unified_id"]
+        raw = item.get("raw_sightings", item["sightings"])
+        cams = sorted(set(s["camera"] for s in item["sightings"]))
+        # Pending badge
+        _pset = _pending_person_ids if entity_type == "Person" else _pending_vehicle_ids
+        if uid in _pset:
+            st.caption(":orange[Pending change queued]")
+        is_selected = st.checkbox(
+            f"{entity_type} {uid}",
+            key=f"{card_key}_{uid}",
+        )
+        if raw:
+            img = _load_image(raw[0].get("crop_path", ""))
+            if img is not None:
+                st.image(img, use_container_width=True)
+        cam_start = (
+            st.session_state.get(f"start_time_{raw[0]['camera']}")
+            if raw else None
+        )
+        time_str = (
+            _format_absolute_time(item["sightings"][0]["first_ts"], cam_start)
+            if item["sightings"] else ""
+        )
+        st.caption(
+            f"{len(raw)} tracks · {', '.join(cams)}\n\n"
+            f"{item['sightings'][0].get('description', '')}\n\n"
+            f"{time_str}"
+        )
+        return uid if is_selected else None
+
+    # ══════════════════════════════════════════════════════════════════
+    # 1. MERGE PERSONS
+    # ══════════════════════════════════════════════════════════════════
+    st.subheader("Merge Persons")
+    if len(persons) < 2:
+        st.info("Need at least 2 persons to merge.")
+    else:
+        with st.form("merge_persons_form", clear_on_submit=True):
+            st.markdown("**Select two or more persons to merge:**")
+            p_selected = []
+            cols_per_row = min(len(persons), 5)
+            for row_start in range(0, len(persons), cols_per_row):
+                row_items = persons[row_start : row_start + cols_per_row]
+                cols = st.columns(cols_per_row)
+                for i, item in enumerate(row_items):
+                    with cols[i]:
+                        r = _render_identity_card(item, "Person", "mp")
+                        if r is not None:
+                            p_selected.append(r)
+            p_reason = st.text_input(
+                "Reason", placeholder="e.g. Same person, different clothing",
+                key="mp_reason",
+            )
+            mp_submit = st.form_submit_button(
+                "Queue Person Merge", type="primary",
+            )
+        if mp_submit:
+            if len(p_selected) >= 2:
+                target = min(p_selected)
+                for other in p_selected:
+                    if other != target:
+                        pending.append({
+                            "action": "merge",
+                            "entity_type": "person",
+                            "source_ids": sorted([target, other]),
+                            "target_id": target,
+                            "reason": p_reason or "Manual merge",
+                        })
+                st.rerun()
+            else:
+                st.warning("Select at least 2 persons.")
+
+    # ══════════════════════════════════════════════════════════════════
+    # 2. MERGE VEHICLES
+    # ══════════════════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("Merge Vehicles")
+    if len(vehicles) < 2:
+        st.info("Need at least 2 vehicles to merge.")
+    else:
+        with st.form("merge_vehicles_form", clear_on_submit=True):
+            st.markdown("**Select two or more vehicles to merge:**")
+            v_selected = []
+            cols_per_row = min(len(vehicles), 5)
+            for row_start in range(0, len(vehicles), cols_per_row):
+                row_items = vehicles[row_start : row_start + cols_per_row]
+                cols = st.columns(cols_per_row)
+                for i, item in enumerate(row_items):
+                    with cols[i]:
+                        r = _render_identity_card(item, "Vehicle", "mv")
+                        if r is not None:
+                            v_selected.append(r)
+            v_reason = st.text_input(
+                "Reason", placeholder="e.g. Same vehicle, different angle",
+                key="mv_reason",
+            )
+            mv_submit = st.form_submit_button(
+                "Queue Vehicle Merge", type="primary",
+            )
+        if mv_submit:
+            if len(v_selected) >= 2:
+                target = min(v_selected)
+                for other in v_selected:
+                    if other != target:
+                        pending.append({
+                            "action": "merge",
+                            "entity_type": "vehicle",
+                            "source_ids": sorted([target, other]),
+                            "target_id": target,
+                            "reason": v_reason or "Manual merge",
+                        })
+                st.rerun()
+            else:
+                st.warning("Select at least 2 vehicles.")
+
+    # ══════════════════════════════════════════════════════════════════
+    # 3. SPLIT IDENTITY
+    # ══════════════════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("Split Identity")
+    split_type = st.radio(
+        "Entity type", ["Person", "Vehicle"], horizontal=True,
+        key="split_type",
+    )
+    s_items = persons if split_type == "Person" else vehicles
+    multi = [i for i in s_items if len(i.get("raw_sightings", i["sightings"])) > 1]
+    if not multi:
+        st.info("No multi-sighting identities to split.")
+    else:
+        options = {}
+        for item in multi:
+            uid = item["unified_id"]
+            n = len(item.get("raw_sightings", item["sightings"]))
+            label = f"{split_type} {uid} — {n} tracks"
+            options[label] = uid
+
+        sel = st.selectbox(
+            "Identity to split", list(options.keys()),
+            key="split_sel",
+        )
+        if sel:
+            uid = options[sel]
+            item = next(i for i in s_items if i["unified_id"] == uid)
+            raw = item.get("raw_sightings", item["sightings"])
+
+            with st.form("split_form", clear_on_submit=True):
+                st.markdown("**Tick sightings to split off into a new identity:**")
+                split_selected = []
+                s_cols_per_row = min(len(raw), 6)
+                for row_start in range(0, len(raw), s_cols_per_row):
+                    row_items = raw[row_start : row_start + s_cols_per_row]
+                    cols = st.columns(s_cols_per_row)
+                    for i, s in enumerate(row_items):
+                        with cols[i]:
+                            img = _load_image(s.get("crop_path", ""))
+                            if img is not None:
+                                st.image(img, use_container_width=True)
+                            cam_start = st.session_state.get(
+                                f"start_time_{s['camera']}"
+                            )
+                            time_str = _format_absolute_time(
+                                s["first_ts"], cam_start
+                            )
+                            eid = s.get("entity_id", "?")
+                            tid = s.get("track_id", "?")
+                            checked = st.checkbox(
+                                f"T{tid} · {s['camera']}",
+                                key=f"split_cb_{uid}_{eid}",
+                            )
+                            st.caption(
+                                f"{s.get('description', '')}\n\n{time_str}"
+                            )
+                            if checked:
+                                split_selected.append(eid)
+
+                s_reason = st.text_input(
+                    "Reason",
+                    placeholder="e.g. Two different people wrongly merged",
+                    key="split_reason",
+                )
+                split_submitted = st.form_submit_button("Queue Split")
+
+            if split_submitted:
+                if split_selected and len(split_selected) < len(raw):
+                    pending.append({
+                        "action": "split",
+                        "entity_type": split_type.lower(),
+                        "source_id": uid,
+                        "entity_ids_to_split": split_selected,
+                        "reason": s_reason or "Manual split",
+                    })
+                    st.rerun()
+                elif split_selected and len(split_selected) == len(raw):
+                    st.warning("Can't split off all sightings — leave at least one.")
+                else:
+                    st.warning("Select at least one sighting to split off.")
+
+    # ══════════════════════════════════════════════════════════════════
+    # 4. JOURNEY MANAGEMENT
+    # ══════════════════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("Journey Management")
+    if journeys:
+        st.markdown("**Current Journeys:**")
+        for idx, j in enumerate(journeys):
+            ev = j.get("event", "")
+            if ev == "round_trip":
+                label = (
+                    f"P{j['person_id']} departed and returned "
+                    f"in V{j['vehicle_id']}"
+                )
+            else:
+                label = f"P{j['person_id']} → V{j['vehicle_id']} ({ev})"
+            manual_tag = " *(manual)*" if j.get("_manual") else ""
+
+            p_item = next(
+                (p for p in persons if p["unified_id"] == j.get("person_id")),
+                None,
+            )
+            v_item = next(
+                (v for v in vehicles if v["unified_id"] == j.get("vehicle_id")),
+                None,
+            )
+            jc = st.columns([1, 1, 3, 1])
+            with jc[0]:
+                if p_item:
+                    p_raw = p_item.get("raw_sightings", p_item["sightings"])
+                    if p_raw:
+                        img = _load_image(p_raw[0].get("crop_path", ""))
+                        if img is not None:
+                            st.image(img, width=80)
+            with jc[1]:
+                if v_item:
+                    v_raw = v_item.get("raw_sightings", v_item["sightings"])
+                    if v_raw:
+                        img = _load_image(v_raw[0].get("crop_path", ""))
+                        if img is not None:
+                            st.image(img, width=80)
+            with jc[2]:
+                st.markdown(f"**{label}**{manual_tag}")
+                st.caption(f"conf={j.get('confidence', '?')}")
+            with jc[3]:
+                if st.button("Queue Remove", key=f"rm_j_{idx}"):
+                    pending.append({
+                        "action": "remove_journey",
+                        "entity_type": "journey",
+                        "journey_index": idx,
+                        "journey_fingerprint": {
+                            "person_id": j.get("person_id"),
+                            "vehicle_id": j.get("vehicle_id"),
+                            "event": j.get("event", ""),
+                        },
+                        "reason": "Manual removal",
+                    })
+                    st.rerun()
+
+    with st.expander("Add Journey"):
+        with st.form("add_journey_form", clear_on_submit=True):
+            j_cols = st.columns(3)
+            with j_cols[0]:
+                p_opts = {
+                    f"Person {p['unified_id']}": p["unified_id"]
+                    for p in persons
+                }
+                j_person = st.selectbox(
+                    "Person", list(p_opts.keys()), key="j_person"
+                )
+            with j_cols[1]:
+                v_opts = {
+                    f"V{v['unified_id']} ({v['sightings'][0].get('description', '')})": v[
+                        "unified_id"
+                    ]
+                    for v in vehicles
+                }
+                j_vehicle = st.selectbox(
+                    "Vehicle", list(v_opts.keys()), key="j_vehicle"
+                )
+            with j_cols[2]:
+                j_event = st.selectbox(
+                    "Event", ["departure", "arrival"], key="j_event"
+                )
+            j_reason = st.text_input(
+                "Reason", key="j_reason",
+                placeholder="e.g. Person clearly gets into vehicle on camera",
+            )
+            j_submit = st.form_submit_button("Queue Journey")
+
+        if j_submit and j_person and j_vehicle:
+            pid = p_opts[j_person]
+            vid = v_opts[j_vehicle]
+            v_item = next(v for v in vehicles if v["unified_id"] == vid)
+            pending.append({
+                "action": "add_journey",
+                "entity_type": "journey",
+                "person_id": pid,
+                "vehicle_id": vid,
+                "event_type": j_event,
+                "vehicle_desc": v_item["sightings"][0].get("description", ""),
+                "reason": j_reason or "Manual journey",
+            })
+            st.rerun()
+
+    # ══════════════════════════════════════════════════════════════════
+    # 5. PENDING CHANGES + SAVE / DISCARD
+    # ══════════════════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("Pending Changes")
+
+    if not pending:
+        st.info("No pending changes. Use the forms above to queue adjustments.")
+    else:
+        # Conflict check: warn if an absorbed entity is referenced elsewhere
+        _removed: dict = {}  # entity_type -> set of IDs being absorbed
+        for _p in pending:
+            if _p["action"] == "merge":
+                _et = _p["entity_type"]
+                for _sid in _p.get("source_ids", []):
+                    if _sid != _p["target_id"]:
+                        _removed.setdefault(_et, set()).add(_sid)
+        _conflicts = []
+        for _ci, _p in enumerate(pending):
+            if _p["action"] == "merge":
+                _et = _p["entity_type"]
+                if _p["target_id"] in _removed.get(_et, set()):
+                    _conflicts.append(
+                        f"Item {_ci+1}: target {_et} {_p['target_id']} "
+                        f"is absorbed by another merge"
+                    )
+        if _conflicts:
+            st.error(
+                "**Conflict detected:**\n\n"
+                + "\n\n".join(_conflicts)
+            )
+        for idx, adj in enumerate(pending):
+            action = adj["action"].replace("_", " ").title()
+            if adj["action"] == "merge":
+                detail = (
+                    f"{adj['entity_type'].title()} "
+                    f"{adj['source_ids']} → keep {adj['target_id']}"
+                )
+            elif adj["action"] == "split":
+                detail = (
+                    f"{adj['entity_type'].title()} {adj['source_id']} "
+                    f"— split off {len(adj.get('entity_ids_to_split', []))} sightings"
+                )
+            elif adj["action"] == "add_journey":
+                detail = (
+                    f"P{adj['person_id']} → V{adj['vehicle_id']} "
+                    f"({adj.get('event_type', '')})"
+                )
+            elif adj["action"] == "remove_journey":
+                detail = f"Remove journey #{adj['journey_index'] + 1}"
+            else:
+                detail = str(adj)
+
+            col_log, col_rm = st.columns([5, 1])
+            with col_log:
+                st.markdown(
+                    f"**{idx + 1}.** **{action}**: {detail}  \n"
+                    f"*{adj.get('reason', '')}*"
+                )
+            with col_rm:
+                if st.button("Remove", key=f"rm_pending_{idx}"):
+                    pending.pop(idx)
+                    st.rerun()
+
+        st.markdown("---")
+        save_col, discard_col, _ = st.columns([2, 2, 4])
+        with save_col:
+            save_clicked = st.button(
+                f"Save All Changes ({len(pending)})",
+                type="primary",
+                key="btn_save_all",
+            )
+        with discard_col:
+            discard_clicked = st.button(
+                "Discard All",
+                key="btn_discard_all",
+            )
+
+        if discard_clicked:
+            st.session_state["pending_adjustments"] = []
+            st.rerun()
+
+        if save_clicked:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            batch_id = st.session_state["adjustment_batch_counter"]
+            st.session_state["adjustment_batch_counter"] = batch_id + 1
+            progress = st.progress(0, text="Applying changes...")
+            total = len(pending)
+            for i, adj in enumerate(pending):
+                adj["timestamp"] = now
+                adj["batch_id"] = batch_id
+                st.session_state["manual_adjustments"].append(adj)
+                progress.progress(
+                    (i + 1) / total,
+                    text=f"Applying {i + 1}/{total}: "
+                    f"{adj['action'].replace('_', ' ')}...",
+                )
+                _time.sleep(0.05)
+            progress.progress(1.0, text="All changes applied!")
+            st.session_state["pending_adjustments"] = []
+            st.session_state.pop("_adjusted_identities_cache", None)
+            _time.sleep(0.3)
+            st.rerun(scope="app")
+
+    # ══════════════════════════════════════════════════════════════════
+    # 6. APPLIED ADJUSTMENT LOG
+    # ══════════════════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("Applied Adjustments Log")
+    adjs = st.session_state.get("manual_adjustments", [])
+    if not adjs:
+        st.info("No applied adjustments yet.")
+    else:
+        # Group by batch_id for display
+        from itertools import groupby
+
+        def _adj_detail(adj):
+            action = adj["action"].replace("_", " ").title()
+            if adj["action"] == "merge":
+                return (
+                    f"**{action}**: {adj['entity_type'].title()} "
+                    f"{adj['source_ids']} → {adj['target_id']}"
+                )
+            elif adj["action"] == "split":
+                return (
+                    f"**{action}**: {adj['entity_type'].title()} "
+                    f"{adj['source_id']} split off "
+                    f"{len(adj.get('entity_ids_to_split', []))} sightings"
+                )
+            elif adj["action"] == "add_journey":
+                return (
+                    f"**{action}**: P{adj['person_id']} → "
+                    f"V{adj['vehicle_id']} ({adj.get('event_type', '')})"
+                )
+            elif adj["action"] == "remove_journey":
+                return f"**{action}**: Journey #{adj['journey_index'] + 1}"
+            return str(adj)
+
+        # Build batch groups
+        batches = []
+        current_batch = []
+        current_bid = None
+        for adj in adjs:
+            bid = adj.get("batch_id")
+            if bid != current_bid and current_batch:
+                batches.append((current_bid, current_batch))
+                current_batch = []
+            current_bid = bid
+            current_batch.append(adj)
+        if current_batch:
+            batches.append((current_bid, current_batch))
+
+        for b_idx, (bid, items) in enumerate(batches):
+            ts = items[0].get("timestamp", "")
+            col_hdr, col_undo = st.columns([5, 1])
+            with col_hdr:
+                if bid is not None:
+                    st.markdown(f"**Batch {b_idx + 1}** — {ts}")
+                else:
+                    st.markdown(f"**Change {b_idx + 1}** — {ts}")
+            with col_undo:
+                if st.button("Undo", key=f"undo_batch_{b_idx}"):
+                    if bid is not None:
+                        st.session_state["manual_adjustments"] = [
+                            a for a in adjs if a.get("batch_id") != bid
+                        ]
+                    else:
+                        # Legacy item — remove first matching
+                        for rm_item in items:
+                            if rm_item in st.session_state["manual_adjustments"]:
+                                st.session_state["manual_adjustments"].remove(
+                                    rm_item
+                                )
+                    st.session_state.pop("_adjusted_identities_cache", None)
+                    st.rerun(scope="app")
+
+            for adj in items:
+                st.markdown(
+                    f"  - {_adj_detail(adj)} · *{adj.get('reason', '')}*"
+                )
+
+
 def _journey_section(identities: dict, cam_a: str, cam_b: str) -> None:
     """Render person-vehicle departure/arrival linkages as a
     horizontal cross-camera timeline: car - garage - garden."""
@@ -901,43 +1660,105 @@ def _journey_section(identities: dict, cam_a: str, cam_b: str) -> None:
         if not person:
             continue
 
-        event_label = "departed in" if j["event"] == "departure" else "arrived in"
-        title = (
-            f"Person {j['person_id']} {event_label} "
-            f"Vehicle {j['vehicle_id']} ({j['vehicle_desc']})"
-        )
+        if j["event"] == "round_trip":
+            dep_j = j.get("departure", {})
+            arr_j = j.get("arrival", {})
+            title = (
+                f"Person {j['person_id']} departed and returned in "
+                f"Vehicle {j['vehicle_id']} ({j['vehicle_desc']})"
+            )
+        elif j["event"] == "departure":
+            title = (
+                f"Person {j['person_id']} departed in "
+                f"Vehicle {j['vehicle_id']} ({j['vehicle_desc']})"
+            )
+        else:
+            title = (
+                f"Person {j['person_id']} arrived in "
+                f"Vehicle {j['vehicle_id']} ({j['vehicle_desc']})"
+            )
 
-        # Build chronological timeline steps across cameras
+        # Build chronological timeline — first & last per camera
+        # Shows the full story: vehicle → person on cam A → person on cam B
+        #   → [time passes] → person back on cam B → person on cam A → vehicle
         steps: list = []
 
-        # Vehicle event
         v_crop = j.get("vehicle_crop")
         if not v_crop and vehicle:
             v_crop = vehicle["sightings"][0].get("crop_path")
-        steps.append(
-            {
-                "type": "vehicle",
-                "label": f"Vehicle {j['vehicle_id']}",
-                "camera": j["camera"],
-                "ts": j["timestamp"],
-                "desc": j["vehicle_desc"],
-                "crop": v_crop,
-            }
-        )
 
-        # Person sightings on each camera
-        for s in person["sightings"]:
-            steps.append(
-                {
-                    "type": "person",
-                    "label": f"Person {j['person_id']}",
-                    "camera": s["camera"],
-                    "ts": s["first_ts"],
-                    "ts_end": s["last_ts"],
-                    "desc": s["description"],
-                    "crop": s.get("crop_path"),
-                }
-            )
+        p_sightings = sorted(person["sightings"], key=lambda s: s["first_ts"])
+
+        # Collect first and last sighting per camera
+        first_by_cam: dict = {}
+        last_by_cam: dict = {}
+        for s in p_sightings:
+            cam = s["camera"]
+            if cam not in first_by_cam:
+                first_by_cam[cam] = s
+            last_by_cam[cam] = s
+
+        def _add_person_steps(sightings_list):
+            """Add first & last per camera, chronologically."""
+            # First appearance on each camera (arrival flow)
+            for s in sightings_list:
+                cam = s["camera"]
+                if s is first_by_cam.get(cam):
+                    steps.append({
+                        "type": "person", "label": f"P{j['person_id']}",
+                        "camera": cam, "ts": s["first_ts"],
+                        "desc": s["description"], "crop": s.get("crop_path"),
+                    })
+            # Last appearance on each camera (departure flow) — reverse order
+            for cam in reversed(list(last_by_cam)):
+                last_s = last_by_cam[cam]
+                # Only add if different from the first (person came back)
+                if last_s is not first_by_cam[cam]:
+                    steps.append({
+                        "type": "person", "label": f"P{j['person_id']}",
+                        "camera": cam, "ts": last_s["first_ts"],
+                        "desc": last_s["description"],
+                        "crop": last_s.get("crop_path"),
+                    })
+
+        if j["event"] == "round_trip":
+            dep_j = j.get("departure", {})
+            arr_j = j.get("arrival", {})
+            # Arrival vehicle first (person gets out)
+            arr_v_crop = arr_j.get("vehicle_crop") or v_crop
+            steps.append({
+                "type": "vehicle", "label": f"V{j['vehicle_id']}",
+                "camera": arr_j.get("camera", j["camera"]),
+                "ts": arr_j.get("timestamp", j["timestamp"]) - 1,
+                "desc": f"{j['vehicle_desc']} (arrives)",
+                "crop": arr_v_crop,
+            })
+            _add_person_steps(p_sightings)
+            # Departure vehicle last (person gets in)
+            dep_v_crop = dep_j.get("vehicle_crop") or v_crop
+            steps.append({
+                "type": "vehicle", "label": f"V{j['vehicle_id']}",
+                "camera": dep_j.get("camera", j["camera"]),
+                "ts": dep_j.get("timestamp", j["timestamp"]) + 1,
+                "desc": f"{j['vehicle_desc']} (departs)",
+                "crop": dep_v_crop,
+            })
+        else:
+            if j["event"] == "arrival":
+                steps.append({
+                    "type": "vehicle", "label": f"V{j['vehicle_id']}",
+                    "camera": j["camera"], "ts": j["timestamp"],
+                    "desc": j["vehicle_desc"], "crop": v_crop,
+                })
+
+            _add_person_steps(p_sightings)
+
+            if j["event"] == "departure":
+                steps.append({
+                    "type": "vehicle", "label": f"V{j['vehicle_id']}",
+                    "camera": j["camera"], "ts": j["timestamp"],
+                    "desc": j["vehicle_desc"], "crop": v_crop,
+                })
 
         # Sort chronologically
         steps.sort(key=lambda s: s["ts"])
@@ -1095,7 +1916,7 @@ def page_cross_timeline(cam_a: str, cam_b: str) -> None:
     _ensure_start_time(cam_b)
     st.header("Movement Timeline")
 
-    identities = _get_unified_identities(cam_a, cam_b)
+    identities = _get_adjusted_identities(cam_a, cam_b)
 
     def _st(cam):
         return st.session_state.get(f"start_time_{cam}")
@@ -2276,12 +3097,73 @@ def _generate_forensic_pdf(
             pdf.line(10, pdf.get_y(), 200, pdf.get_y())
             pdf.ln(4)
 
+    # ── Manual Corrections section ──
+    manual_adjs = st.session_state.get("manual_adjustments", [])
+    if manual_adjs:
+        pdf.add_page()
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.set_text_color(*DARK)
+        pdf.cell(0, 10, "Manual Corrections", ln=True)
+        pdf.ln(2)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(*GREY)
+        pdf.cell(
+            0, 5,
+            f"{len(manual_adjs)} manual adjustment(s) applied to automated results.",
+            ln=True,
+        )
+        pdf.ln(4)
+
+        # Table header
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_fill_color(240, 240, 240)
+        col_w = [10, 30, 25, 70, 55]
+        headers = ["#", "Time", "Action", "Details", "Reason"]
+        for i, h in enumerate(headers):
+            pdf.cell(col_w[i], 6, h, border=1, fill=True)
+        pdf.ln()
+
+        pdf.set_font("Helvetica", "", 7)
+        pdf.set_text_color(*DARK)
+        for idx, adj in enumerate(manual_adjs, 1):
+            action = adj["action"].replace("_", " ").title()
+            if adj["action"] == "merge":
+                detail = (
+                    f"{adj['entity_type'].title()} "
+                    f"{adj['source_ids']} -> {adj['target_id']}"
+                )
+            elif adj["action"] == "split":
+                detail = (
+                    f"{adj['entity_type'].title()} {adj['source_id']} "
+                    f"split off {len(adj.get('entity_ids_to_split', []))} sightings"
+                )
+            elif adj["action"] == "add_journey":
+                detail = (
+                    f"P{adj['person_id']} -> V{adj['vehicle_id']} "
+                    f"({adj.get('event_type', '')})"
+                )
+            elif adj["action"] == "remove_journey":
+                detail = f"Removed journey index {adj['journey_index']}"
+            else:
+                detail = str(adj)
+
+            row = [
+                str(idx),
+                adj.get("timestamp", ""),
+                action,
+                detail,
+                adj.get("reason", ""),
+            ]
+            for i, val in enumerate(row):
+                pdf.cell(col_w[i], 5, val[:40], border=1)
+            pdf.ln()
+
     return bytes(pdf.output())
 
 
 def _show_cross_matches_summary(cam_a: str, cam_b: str) -> None:
     """Show unified identities summary below dual view."""
-    identities = _get_unified_identities(cam_a, cam_b)
+    identities = _get_adjusted_identities(cam_a, cam_b)
     persons = identities["persons"]
     vehicles = identities["vehicles"]
 
@@ -2704,7 +3586,7 @@ def page_evidence_export(cam_a: str, cam_b: str) -> None:
         "crop images, hash manifest, and optional extras."
     )
 
-    identities = _get_unified_identities(cam_a, cam_b)
+    identities = _get_adjusted_identities(cam_a, cam_b)
     if not identities["persons"] and not identities["vehicles"]:
         st.info("No tracked entities found. Process videos first.")
         return
@@ -3626,6 +4508,7 @@ def main() -> None:
             st.title(f"Cross-Camera Analysis — {cam_a} / {cam_b}")
             (
                 tab_id,
+                tab_adjust,
                 tab_timeline,
                 tab_dual,
                 tab_search,
@@ -3637,6 +4520,7 @@ def main() -> None:
             ) = st.tabs(
                 [
                     "Identity Deep Dive",
+                    "Manual Adjustments",
                     "Timeline",
                     "Dual View",
                     "Search",
@@ -3649,6 +4533,8 @@ def main() -> None:
             )
             with tab_id:
                 page_cross_identity(cam_a, cam_b)
+            with tab_adjust:
+                page_manual_adjustments(cam_a, cam_b)
             with tab_timeline:
                 page_cross_timeline(cam_a, cam_b)
             with tab_dual:
