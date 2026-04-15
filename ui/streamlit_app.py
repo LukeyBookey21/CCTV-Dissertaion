@@ -32,9 +32,73 @@ from cctv_dissertation.storage import (  # noqa: E402
 DETECTIONS_DIR = Path("data/detections")
 UPLOADS_DIR = Path("data/uploads")
 PREVIEWS_DIR = Path("data/previews")
-TRACKER_DB = PROJECT_ROOT / "data" / "tracker.db"
-TRACKED_OUTPUT = PROJECT_ROOT / "data" / "tracked_output"
+TRACKER_DB = PROJECT_ROOT / "data" / "scalability_tests" / "11h" / "tracker.db"
+TRACKED_OUTPUT = PROJECT_ROOT / "data" / "scalability_tests" / "11h" / "tracked_output"
 CLIPS_DIR = PROJECT_ROOT / "data" / "clips"
+
+
+# ── Session management helpers ────────────────────────────────────
+
+
+def _clear_session_data() -> None:
+    """Wipe all tracking artifacts so the app starts clean."""
+    if TRACKER_DB.exists():
+        try:
+            TRACKER_DB.unlink()
+        except OSError:
+            pass
+    for d in (TRACKED_OUTPUT, CLIPS_DIR):
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True, exist_ok=True)
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _build_session_zip() -> bytes:
+    """Return a ZIP of tracker.db + crop images (no videos) as raw bytes."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    _image_exts = {".jpg", ".jpeg", ".png"}
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if TRACKER_DB.exists():
+            zf.write(TRACKER_DB, "tracker.db")
+        if TRACKED_OUTPUT.exists():
+            for f in TRACKED_OUTPUT.rglob("*"):
+                if f.is_file() and f.suffix.lower() in _image_exts:
+                    zf.write(f, f.relative_to(PROJECT_ROOT / "data"))
+    buf.seek(0)
+    return buf.read()
+
+
+def _restore_session_zip(zip_bytes: bytes) -> str:
+    """Extract a session ZIP and restore DB + crops.
+
+    Returns an empty string on success, or an error message string.
+    """
+    import io
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            names = zf.namelist()
+            if "tracker.db" not in names:
+                return "Invalid session file — tracker.db not found inside the ZIP."
+            # Wipe existing artifacts before restoring
+            if TRACKED_OUTPUT.exists():
+                shutil.rmtree(TRACKED_OUTPUT, ignore_errors=True)
+            TRACKED_OUTPUT.mkdir(parents=True, exist_ok=True)
+            for name in names:
+                target = PROJECT_ROOT / "data" / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(name) as src, open(target, "wb") as dst:
+                    dst.write(src.read())
+    except zipfile.BadZipFile:
+        return "The uploaded file is not a valid ZIP archive."
+    except Exception as exc:
+        return f"Failed to restore session: {exc}"
+    return ""
 
 
 # ── Database query helpers ────────────────────────────────────────
@@ -140,6 +204,7 @@ def _search_entities(
     return [dict(r) for r in rows]
 
 
+@st.cache_data(show_spinner=False, max_entries=200)
 def _load_image(path_str: str) -> Optional[np.ndarray]:
     p = Path(path_str)
     if not p.is_absolute():
@@ -181,32 +246,244 @@ def _get_unified_identities(cam_a: str, cam_b: str) -> dict:
     cache_key = "unified_identities_cache"
     cam_key = "unified_identities_cameras"
     mtime_key = "unified_identities_mtime"
+    code_mtime_key = "unified_identities_code_mtime"
 
     # Invalidate cache when DB file changes (re-processing, code changes)
     db_mtime = TRACKER_DB.stat().st_mtime if TRACKER_DB.exists() else 0
+    tracker_py = PROJECT_ROOT / "src" / "cctv_dissertation" / "tracker.py"
+    code_mtime = tracker_py.stat().st_mtime if tracker_py.exists() else 0
     cached_cams = st.session_state.get(cam_key)
     cached_mtime = st.session_state.get(mtime_key)
+    cached_code_mtime = st.session_state.get(code_mtime_key)
 
     if (
         cached_cams == (cam_a, cam_b)
         and cached_mtime == db_mtime
+        and cached_code_mtime == code_mtime
         and cache_key in st.session_state
     ):
         return st.session_state[cache_key]
 
     from cctv_dissertation.tracker import build_unified_identities
 
-    result = build_unified_identities(
-        str(TRACKER_DB),
-        cam_a,
-        cam_b,
-        person_threshold=0.45,
-        vehicle_threshold=0.80,
-    )
+    with st.spinner("Matching identities across cameras — this may take a moment..."):
+        result = build_unified_identities(
+            str(TRACKER_DB),
+            cam_a,
+            cam_b,
+        )
     st.session_state[cache_key] = result
     st.session_state[cam_key] = (cam_a, cam_b)
     st.session_state[mtime_key] = db_mtime
+    st.session_state[code_mtime_key] = code_mtime
     return result
+
+
+# ── Manual adjustment helpers ────────────────────────────────────
+
+
+def _get_adjusted_identities(cam_a: str, cam_b: str) -> dict:
+    """Get unified identities with manual adjustments applied (cached per rerun)."""
+    adj_count = len(st.session_state.get("manual_adjustments", []))
+    cache_key = "_adjusted_identities_cache"
+    count_key = "_adjusted_identities_adj_count"
+    if (
+        cache_key in st.session_state
+        and st.session_state.get(count_key) == adj_count
+    ):
+        return st.session_state[cache_key]
+    raw = _get_unified_identities(cam_a, cam_b)
+    result = _apply_manual_adjustments(raw)
+    st.session_state[cache_key] = result
+    st.session_state[count_key] = adj_count
+    return result
+
+
+def _renumber_identities(result: dict) -> None:
+    """Re-number unified_ids sequentially after each adjustment."""
+    for entity_type in ["persons", "vehicles"]:
+        items = result.get(entity_type, [])
+        items.sort(key=lambda x: x["sightings"][0]["first_ts"])
+        old_to_new = {}
+        for i, item in enumerate(items, 1):
+            old_to_new[item["unified_id"]] = i
+            item["unified_id"] = i
+        # Update journey references
+        key = "person_id" if entity_type == "persons" else "vehicle_id"
+        for j in result.get("journeys", []):
+            old_id = j.get(key)
+            if old_id in old_to_new:
+                j[key] = old_to_new[old_id]
+
+
+def _apply_manual_adjustments(identities: dict) -> dict:
+    """Return a deep copy of identities with manual adjustments applied."""
+    import copy
+
+    adjustments = st.session_state.get("manual_adjustments", [])
+    if not adjustments:
+        return identities
+
+    result = copy.deepcopy(identities)
+
+    for i, adj in enumerate(adjustments):
+        if adj["action"] == "merge":
+            _apply_merge(result, adj)
+        elif adj["action"] == "split":
+            _apply_split(result, adj)
+        elif adj["action"] == "add_journey":
+            _apply_add_journey(result, adj)
+        elif adj["action"] == "remove_journey":
+            _apply_remove_journey(result, adj)
+
+        # Renumber at batch boundaries only — items in the same batch
+        # share an ID space (queued against the same displayed state).
+        curr_batch = adj.get("batch_id")
+        next_batch = (
+            adjustments[i + 1].get("batch_id")
+            if i + 1 < len(adjustments)
+            else None
+        )
+        if curr_batch is None or curr_batch != next_batch:
+            _renumber_identities(result)
+
+    return result
+
+
+def _apply_merge(result: dict, adj: dict) -> None:
+    key = "persons" if adj["entity_type"] == "person" else "vehicles"
+    items = result[key]
+    src_ids = adj["source_ids"]
+    target_id = adj["target_id"]
+    other_id = [i for i in src_ids if i != target_id][0]
+
+    target = None
+    other = None
+    for item in items:
+        if item["unified_id"] == target_id:
+            target = item
+        elif item["unified_id"] == other_id:
+            other = item
+
+    if not target or not other:
+        return
+
+    target["sightings"].extend(other["sightings"])
+    target["sightings"].sort(key=lambda x: x["first_ts"])
+    target["raw_sightings"] = target.get("raw_sightings", []) + other.get(
+        "raw_sightings", []
+    )
+    target["raw_sightings"].sort(key=lambda x: x["first_ts"])
+
+    cams = set(s["camera"] for s in target["sightings"])
+    target["matched"] = len(cams) > 1
+    target["_manually_merged"] = True
+
+    # Update journeys referencing the absorbed identity
+    for j in result.get("journeys", []):
+        if adj["entity_type"] == "person" and j.get("person_id") == other_id:
+            j["person_id"] = target_id
+        elif adj["entity_type"] == "vehicle" and j.get("vehicle_id") == other_id:
+            j["vehicle_id"] = target_id
+
+    items.remove(other)
+
+
+def _apply_split(result: dict, adj: dict) -> None:
+    key = "persons" if adj["entity_type"] == "person" else "vehicles"
+    items = result[key]
+
+    source = None
+    for item in items:
+        if item["unified_id"] == adj["source_id"]:
+            source = item
+            break
+    if not source:
+        return
+
+    split_eids = set(adj.get("entity_ids_to_split", []))
+    keep_sightings = []
+    split_sightings = []
+    keep_raw = []
+    split_raw = []
+
+    for s in source["sightings"]:
+        if s.get("entity_id") in split_eids:
+            split_sightings.append(s)
+        else:
+            keep_sightings.append(s)
+
+    for s in source.get("raw_sightings", []):
+        if s.get("entity_id") in split_eids:
+            split_raw.append(s)
+        else:
+            keep_raw.append(s)
+
+    if not split_sightings or not keep_sightings:
+        return
+
+    source["sightings"] = keep_sightings
+    source["raw_sightings"] = keep_raw
+    cams = set(s["camera"] for s in keep_sightings)
+    source["matched"] = len(cams) > 1
+
+    new_id = max(i["unified_id"] for i in items) + 1
+    new_identity = {
+        "unified_id": new_id,
+        "sightings": split_sightings,
+        "raw_sightings": split_raw,
+        "matched": len(set(s["camera"] for s in split_sightings)) > 1,
+        "similarity": None,
+        "_manually_split": True,
+    }
+    items.append(new_identity)
+
+
+def _apply_add_journey(result: dict, adj: dict) -> None:
+    journeys = result.setdefault("journeys", [])
+    journeys.append(
+        {
+            "person_id": adj["person_id"],
+            "vehicle_id": adj["vehicle_id"],
+            "event": adj["event_type"],
+            "vehicle_desc": adj.get("vehicle_desc", ""),
+            "person_desc": adj.get("person_desc", ""),
+            "timestamp": 0,
+            "person_ts": 0,
+            "gap_seconds": 0,
+            "confidence": 1.0,
+            "camera": "",
+            "_manual": True,
+        }
+    )
+
+
+def _apply_remove_journey(result: dict, adj: dict) -> None:
+    journeys = result.get("journeys", [])
+    idx = adj.get("journey_index")
+    fp = adj.get("journey_fingerprint")
+
+    # Try index first, verify with fingerprint if available
+    if idx is not None and 0 <= idx < len(journeys):
+        j = journeys[idx]
+        if fp is None or (
+            j.get("person_id") == fp.get("person_id")
+            and j.get("vehicle_id") == fp.get("vehicle_id")
+            and j.get("event") == fp.get("event")
+        ):
+            journeys.pop(idx)
+            return
+
+    # Fallback: search by fingerprint
+    if fp:
+        for i, j in enumerate(journeys):
+            if (
+                j.get("person_id") == fp.get("person_id")
+                and j.get("vehicle_id") == fp.get("vehicle_id")
+                and j.get("event") == fp.get("event")
+            ):
+                journeys.pop(i)
+                return
 
 
 # ── Single-camera pages ──────────────────────────────────────────
@@ -455,10 +732,18 @@ def page_cross_dual_view(cam_a: str, cam_b: str) -> None:
 def _format_absolute_time(video_ts: float, start_time: Optional[str]) -> str:
     """Convert video timestamp to HH:MM:SS.
 
-    Returns absolute wall-clock time when start_time (from OCR) is known,
-    otherwise returns a relative HH:MM:SS offset from video start.
+    If the timestamp is already epoch-based (from OCR offset during
+    processing), convert directly.  Otherwise add to start_time or
+    fall back to relative HH:MM:SS.
     """
     from datetime import datetime, timedelta
+
+    # Epoch-based timestamps (set during processing via OCR offset)
+    if video_ts > 1_000_000_000:
+        try:
+            return datetime.fromtimestamp(video_ts).strftime("%H:%M:%S")
+        except (OSError, ValueError):
+            pass
 
     if start_time:
         try:
@@ -480,6 +765,13 @@ def _to_absolute_datetime(
 ):
     """Convert video timestamp to a full datetime object."""
     from datetime import datetime, timedelta
+
+    # Epoch-based timestamps
+    if video_ts > 1_000_000_000:
+        try:
+            return datetime.fromtimestamp(video_ts)
+        except (OSError, ValueError):
+            return None
 
     if not start_time:
         return None
@@ -562,7 +854,7 @@ def page_cross_identity(cam_a: str, cam_b: str) -> None:
 
     from cctv_dissertation.tracker import generate_cross_camera_clip
 
-    identities = _get_unified_identities(cam_a, cam_b)
+    identities = _get_adjusted_identities(cam_a, cam_b)
 
     persons = identities["persons"]
     vehicles = identities["vehicles"]
@@ -570,44 +862,6 @@ def page_cross_identity(cam_a: str, cam_b: str) -> None:
     if not persons and not vehicles:
         st.info("No tracked entities found.")
         return
-
-    # ── PDF Download ──
-    date_a = st.session_state.get(f"start_date_{cam_a}")
-    date_b = st.session_state.get(f"start_date_{cam_b}")
-
-    # Get video paths from database
-    conn = sqlite3.connect(str(TRACKER_DB))
-    video_a = conn.execute(
-        "SELECT DISTINCT video_path FROM tracked_entities WHERE camera_label = ? LIMIT 1",  # noqa: E501
-        (cam_a,),
-    ).fetchone()
-    video_b = conn.execute(
-        "SELECT DISTINCT video_path FROM tracked_entities WHERE camera_label = ? LIMIT 1",  # noqa: E501
-        (cam_b,),
-    ).fetchone()
-    conn.close()
-
-    video_a = video_a[0] if video_a else None
-    video_b = video_b[0] if video_b else None
-
-    pdf_bytes = _generate_forensic_pdf(
-        identities,
-        cam_a,
-        cam_b,
-        start_time_a,
-        start_time_b,
-        date_a,
-        date_b,
-        video_a,
-        video_b,
-    )
-    st.download_button(
-        label="Download Forensic Report (PDF)",
-        data=pdf_bytes,
-        file_name="forensic_report.pdf",
-        mime="application/pdf",
-        type="primary",
-    )
 
     def _get_start_time(camera: str) -> Optional[str]:
         if camera == cam_a:
@@ -810,6 +1064,542 @@ def page_cross_identity(cam_a: str, cam_b: str) -> None:
     _journey_section(identities, cam_a, cam_b)
 
 
+@st.fragment
+def page_manual_adjustments(cam_a: str, cam_b: str) -> None:
+    """Manual identity adjustments — batch queue, then save all at once."""
+    from datetime import datetime
+    import time as _time
+
+    st.header("Manual Adjustments")
+    st.caption(
+        "Queue merges, splits, and journey edits below. "
+        "Nothing is applied until you press **Save All Changes**."
+    )
+
+    if "manual_adjustments" not in st.session_state:
+        st.session_state["manual_adjustments"] = []
+    if "pending_adjustments" not in st.session_state:
+        st.session_state["pending_adjustments"] = []
+    if "adjustment_batch_counter" not in st.session_state:
+        st.session_state["adjustment_batch_counter"] = 0
+
+    identities = _get_adjusted_identities(cam_a, cam_b)
+    persons = identities.get("persons", [])
+    vehicles = identities.get("vehicles", [])
+    journeys = identities.get("journeys", [])
+
+    pending = st.session_state["pending_adjustments"]
+
+    # ── Pending Changes Banner ──
+    if pending:
+        st.warning(
+            f"**{len(pending)} pending change(s)** — "
+            "scroll to bottom to Save or Discard."
+        )
+
+    # ── Build pending lookup for visual badges ──
+    _pending_person_ids: set = set()
+    _pending_vehicle_ids: set = set()
+    for _pa in pending:
+        if _pa["action"] == "merge":
+            _ids = set(_pa.get("source_ids", []))
+            if _pa["entity_type"] == "person":
+                _pending_person_ids |= _ids
+            else:
+                _pending_vehicle_ids |= _ids
+        elif _pa["action"] == "split":
+            _sid = _pa.get("source_id")
+            if _pa["entity_type"] == "person":
+                _pending_person_ids.add(_sid)
+            else:
+                _pending_vehicle_ids.add(_sid)
+
+    # ── Helper: render identity card inside a form ──
+    def _render_identity_card(item, entity_type, card_key):
+        uid = item["unified_id"]
+        raw = item.get("raw_sightings", item["sightings"])
+        cams = sorted(set(s["camera"] for s in item["sightings"]))
+        # Pending badge
+        _pset = _pending_person_ids if entity_type == "Person" else _pending_vehicle_ids
+        if uid in _pset:
+            st.caption(":orange[Pending change queued]")
+        is_selected = st.checkbox(
+            f"{entity_type} {uid}",
+            key=f"{card_key}_{uid}",
+        )
+        if raw:
+            img = _load_image(raw[0].get("crop_path", ""))
+            if img is not None:
+                st.image(img, use_container_width=True)
+        cam_start = (
+            st.session_state.get(f"start_time_{raw[0]['camera']}")
+            if raw else None
+        )
+        time_str = (
+            _format_absolute_time(item["sightings"][0]["first_ts"], cam_start)
+            if item["sightings"] else ""
+        )
+        st.caption(
+            f"{len(raw)} tracks · {', '.join(cams)}\n\n"
+            f"{item['sightings'][0].get('description', '')}\n\n"
+            f"{time_str}"
+        )
+        return uid if is_selected else None
+
+    # ══════════════════════════════════════════════════════════════════
+    # 1. MERGE PERSONS
+    # ══════════════════════════════════════════════════════════════════
+    st.subheader("Merge Persons")
+    if len(persons) < 2:
+        st.info("Need at least 2 persons to merge.")
+    else:
+        with st.form("merge_persons_form", clear_on_submit=True):
+            st.markdown("**Select two or more persons to merge:**")
+            p_selected = []
+            cols_per_row = min(len(persons), 5)
+            for row_start in range(0, len(persons), cols_per_row):
+                row_items = persons[row_start : row_start + cols_per_row]
+                cols = st.columns(cols_per_row)
+                for i, item in enumerate(row_items):
+                    with cols[i]:
+                        r = _render_identity_card(item, "Person", "mp")
+                        if r is not None:
+                            p_selected.append(r)
+            p_reason = st.text_input(
+                "Reason", placeholder="e.g. Same person, different clothing",
+                key="mp_reason",
+            )
+            mp_submit = st.form_submit_button(
+                "Queue Person Merge", type="primary",
+            )
+        if mp_submit:
+            if len(p_selected) >= 2:
+                target = min(p_selected)
+                for other in p_selected:
+                    if other != target:
+                        pending.append({
+                            "action": "merge",
+                            "entity_type": "person",
+                            "source_ids": sorted([target, other]),
+                            "target_id": target,
+                            "reason": p_reason or "Manual merge",
+                        })
+                st.rerun()
+            else:
+                st.warning("Select at least 2 persons.")
+
+    # ══════════════════════════════════════════════════════════════════
+    # 2. MERGE VEHICLES
+    # ══════════════════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("Merge Vehicles")
+    if len(vehicles) < 2:
+        st.info("Need at least 2 vehicles to merge.")
+    else:
+        with st.form("merge_vehicles_form", clear_on_submit=True):
+            st.markdown("**Select two or more vehicles to merge:**")
+            v_selected = []
+            cols_per_row = min(len(vehicles), 5)
+            for row_start in range(0, len(vehicles), cols_per_row):
+                row_items = vehicles[row_start : row_start + cols_per_row]
+                cols = st.columns(cols_per_row)
+                for i, item in enumerate(row_items):
+                    with cols[i]:
+                        r = _render_identity_card(item, "Vehicle", "mv")
+                        if r is not None:
+                            v_selected.append(r)
+            v_reason = st.text_input(
+                "Reason", placeholder="e.g. Same vehicle, different angle",
+                key="mv_reason",
+            )
+            mv_submit = st.form_submit_button(
+                "Queue Vehicle Merge", type="primary",
+            )
+        if mv_submit:
+            if len(v_selected) >= 2:
+                target = min(v_selected)
+                for other in v_selected:
+                    if other != target:
+                        pending.append({
+                            "action": "merge",
+                            "entity_type": "vehicle",
+                            "source_ids": sorted([target, other]),
+                            "target_id": target,
+                            "reason": v_reason or "Manual merge",
+                        })
+                st.rerun()
+            else:
+                st.warning("Select at least 2 vehicles.")
+
+    # ══════════════════════════════════════════════════════════════════
+    # 3. SPLIT IDENTITY
+    # ══════════════════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("Split Identity")
+    split_type = st.radio(
+        "Entity type", ["Person", "Vehicle"], horizontal=True,
+        key="split_type",
+    )
+    s_items = persons if split_type == "Person" else vehicles
+    multi = [i for i in s_items if len(i.get("raw_sightings", i["sightings"])) > 1]
+    if not multi:
+        st.info("No multi-sighting identities to split.")
+    else:
+        options = {}
+        for item in multi:
+            uid = item["unified_id"]
+            n = len(item.get("raw_sightings", item["sightings"]))
+            label = f"{split_type} {uid} — {n} tracks"
+            options[label] = uid
+
+        sel = st.selectbox(
+            "Identity to split", list(options.keys()),
+            key="split_sel",
+        )
+        if sel:
+            uid = options[sel]
+            item = next(i for i in s_items if i["unified_id"] == uid)
+            raw = item.get("raw_sightings", item["sightings"])
+
+            with st.form("split_form", clear_on_submit=True):
+                st.markdown("**Tick sightings to split off into a new identity:**")
+                split_selected = []
+                s_cols_per_row = min(len(raw), 6)
+                for row_start in range(0, len(raw), s_cols_per_row):
+                    row_items = raw[row_start : row_start + s_cols_per_row]
+                    cols = st.columns(s_cols_per_row)
+                    for i, s in enumerate(row_items):
+                        with cols[i]:
+                            img = _load_image(s.get("crop_path", ""))
+                            if img is not None:
+                                st.image(img, use_container_width=True)
+                            cam_start = st.session_state.get(
+                                f"start_time_{s['camera']}"
+                            )
+                            time_str = _format_absolute_time(
+                                s["first_ts"], cam_start
+                            )
+                            eid = s.get("entity_id", "?")
+                            tid = s.get("track_id", "?")
+                            checked = st.checkbox(
+                                f"T{tid} · {s['camera']}",
+                                key=f"split_cb_{uid}_{eid}",
+                            )
+                            st.caption(
+                                f"{s.get('description', '')}\n\n{time_str}"
+                            )
+                            if checked:
+                                split_selected.append(eid)
+
+                s_reason = st.text_input(
+                    "Reason",
+                    placeholder="e.g. Two different people wrongly merged",
+                    key="split_reason",
+                )
+                split_submitted = st.form_submit_button("Queue Split")
+
+            if split_submitted:
+                if split_selected and len(split_selected) < len(raw):
+                    pending.append({
+                        "action": "split",
+                        "entity_type": split_type.lower(),
+                        "source_id": uid,
+                        "entity_ids_to_split": split_selected,
+                        "reason": s_reason or "Manual split",
+                    })
+                    st.rerun()
+                elif split_selected and len(split_selected) == len(raw):
+                    st.warning("Can't split off all sightings — leave at least one.")
+                else:
+                    st.warning("Select at least one sighting to split off.")
+
+    # ══════════════════════════════════════════════════════════════════
+    # 4. JOURNEY MANAGEMENT
+    # ══════════════════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("Journey Management")
+    if journeys:
+        st.markdown("**Current Journeys:**")
+        for idx, j in enumerate(journeys):
+            ev = j.get("event", "")
+            if ev == "round_trip":
+                label = (
+                    f"P{j['person_id']} departed and returned "
+                    f"in V{j['vehicle_id']}"
+                )
+            else:
+                label = f"P{j['person_id']} → V{j['vehicle_id']} ({ev})"
+            manual_tag = " *(manual)*" if j.get("_manual") else ""
+
+            p_item = next(
+                (p for p in persons if p["unified_id"] == j.get("person_id")),
+                None,
+            )
+            v_item = next(
+                (v for v in vehicles if v["unified_id"] == j.get("vehicle_id")),
+                None,
+            )
+            jc = st.columns([1, 1, 3, 1])
+            with jc[0]:
+                if p_item:
+                    p_raw = p_item.get("raw_sightings", p_item["sightings"])
+                    if p_raw:
+                        img = _load_image(p_raw[0].get("crop_path", ""))
+                        if img is not None:
+                            st.image(img, width=80)
+            with jc[1]:
+                if v_item:
+                    v_raw = v_item.get("raw_sightings", v_item["sightings"])
+                    if v_raw:
+                        img = _load_image(v_raw[0].get("crop_path", ""))
+                        if img is not None:
+                            st.image(img, width=80)
+            with jc[2]:
+                st.markdown(f"**{label}**{manual_tag}")
+                st.caption(f"conf={j.get('confidence', '?')}")
+            with jc[3]:
+                if st.button("Queue Remove", key=f"rm_j_{idx}"):
+                    pending.append({
+                        "action": "remove_journey",
+                        "entity_type": "journey",
+                        "journey_index": idx,
+                        "journey_fingerprint": {
+                            "person_id": j.get("person_id"),
+                            "vehicle_id": j.get("vehicle_id"),
+                            "event": j.get("event", ""),
+                        },
+                        "reason": "Manual removal",
+                    })
+                    st.rerun()
+
+    with st.expander("Add Journey"):
+        with st.form("add_journey_form", clear_on_submit=True):
+            j_cols = st.columns(3)
+            with j_cols[0]:
+                p_opts = {
+                    f"Person {p['unified_id']}": p["unified_id"]
+                    for p in persons
+                }
+                j_person = st.selectbox(
+                    "Person", list(p_opts.keys()), key="j_person"
+                )
+            with j_cols[1]:
+                v_opts = {
+                    f"V{v['unified_id']} ({v['sightings'][0].get('description', '')})": v[
+                        "unified_id"
+                    ]
+                    for v in vehicles
+                }
+                j_vehicle = st.selectbox(
+                    "Vehicle", list(v_opts.keys()), key="j_vehicle"
+                )
+            with j_cols[2]:
+                j_event = st.selectbox(
+                    "Event", ["departure", "arrival"], key="j_event"
+                )
+            j_reason = st.text_input(
+                "Reason", key="j_reason",
+                placeholder="e.g. Person clearly gets into vehicle on camera",
+            )
+            j_submit = st.form_submit_button("Queue Journey")
+
+        if j_submit and j_person and j_vehicle:
+            pid = p_opts[j_person]
+            vid = v_opts[j_vehicle]
+            v_item = next(v for v in vehicles if v["unified_id"] == vid)
+            pending.append({
+                "action": "add_journey",
+                "entity_type": "journey",
+                "person_id": pid,
+                "vehicle_id": vid,
+                "event_type": j_event,
+                "vehicle_desc": v_item["sightings"][0].get("description", ""),
+                "reason": j_reason or "Manual journey",
+            })
+            st.rerun()
+
+    # ══════════════════════════════════════════════════════════════════
+    # 5. PENDING CHANGES + SAVE / DISCARD
+    # ══════════════════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("Pending Changes")
+
+    if not pending:
+        st.info("No pending changes. Use the forms above to queue adjustments.")
+    else:
+        # Conflict check: warn if an absorbed entity is referenced elsewhere
+        _removed: dict = {}  # entity_type -> set of IDs being absorbed
+        for _p in pending:
+            if _p["action"] == "merge":
+                _et = _p["entity_type"]
+                for _sid in _p.get("source_ids", []):
+                    if _sid != _p["target_id"]:
+                        _removed.setdefault(_et, set()).add(_sid)
+        _conflicts = []
+        for _ci, _p in enumerate(pending):
+            if _p["action"] == "merge":
+                _et = _p["entity_type"]
+                if _p["target_id"] in _removed.get(_et, set()):
+                    _conflicts.append(
+                        f"Item {_ci+1}: target {_et} {_p['target_id']} "
+                        f"is absorbed by another merge"
+                    )
+        if _conflicts:
+            st.error(
+                "**Conflict detected:**\n\n"
+                + "\n\n".join(_conflicts)
+            )
+        for idx, adj in enumerate(pending):
+            action = adj["action"].replace("_", " ").title()
+            if adj["action"] == "merge":
+                detail = (
+                    f"{adj['entity_type'].title()} "
+                    f"{adj['source_ids']} → keep {adj['target_id']}"
+                )
+            elif adj["action"] == "split":
+                detail = (
+                    f"{adj['entity_type'].title()} {adj['source_id']} "
+                    f"— split off {len(adj.get('entity_ids_to_split', []))} sightings"
+                )
+            elif adj["action"] == "add_journey":
+                detail = (
+                    f"P{adj['person_id']} → V{adj['vehicle_id']} "
+                    f"({adj.get('event_type', '')})"
+                )
+            elif adj["action"] == "remove_journey":
+                detail = f"Remove journey #{adj['journey_index'] + 1}"
+            else:
+                detail = str(adj)
+
+            col_log, col_rm = st.columns([5, 1])
+            with col_log:
+                st.markdown(
+                    f"**{idx + 1}.** **{action}**: {detail}  \n"
+                    f"*{adj.get('reason', '')}*"
+                )
+            with col_rm:
+                if st.button("Remove", key=f"rm_pending_{idx}"):
+                    pending.pop(idx)
+                    st.rerun()
+
+        st.markdown("---")
+        save_col, discard_col, _ = st.columns([2, 2, 4])
+        with save_col:
+            save_clicked = st.button(
+                f"Save All Changes ({len(pending)})",
+                type="primary",
+                key="btn_save_all",
+            )
+        with discard_col:
+            discard_clicked = st.button(
+                "Discard All",
+                key="btn_discard_all",
+            )
+
+        if discard_clicked:
+            st.session_state["pending_adjustments"] = []
+            st.rerun()
+
+        if save_clicked:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            batch_id = st.session_state["adjustment_batch_counter"]
+            st.session_state["adjustment_batch_counter"] = batch_id + 1
+            progress = st.progress(0, text="Applying changes...")
+            total = len(pending)
+            for i, adj in enumerate(pending):
+                adj["timestamp"] = now
+                adj["batch_id"] = batch_id
+                st.session_state["manual_adjustments"].append(adj)
+                progress.progress(
+                    (i + 1) / total,
+                    text=f"Applying {i + 1}/{total}: "
+                    f"{adj['action'].replace('_', ' ')}...",
+                )
+                _time.sleep(0.05)
+            progress.progress(1.0, text="All changes applied!")
+            st.session_state["pending_adjustments"] = []
+            st.session_state.pop("_adjusted_identities_cache", None)
+            _time.sleep(0.3)
+            st.rerun(scope="app")
+
+    # ══════════════════════════════════════════════════════════════════
+    # 6. APPLIED ADJUSTMENT LOG
+    # ══════════════════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("Applied Adjustments Log")
+    adjs = st.session_state.get("manual_adjustments", [])
+    if not adjs:
+        st.info("No applied adjustments yet.")
+    else:
+        # Group by batch_id for display
+        from itertools import groupby
+
+        def _adj_detail(adj):
+            action = adj["action"].replace("_", " ").title()
+            if adj["action"] == "merge":
+                return (
+                    f"**{action}**: {adj['entity_type'].title()} "
+                    f"{adj['source_ids']} → {adj['target_id']}"
+                )
+            elif adj["action"] == "split":
+                return (
+                    f"**{action}**: {adj['entity_type'].title()} "
+                    f"{adj['source_id']} split off "
+                    f"{len(adj.get('entity_ids_to_split', []))} sightings"
+                )
+            elif adj["action"] == "add_journey":
+                return (
+                    f"**{action}**: P{adj['person_id']} → "
+                    f"V{adj['vehicle_id']} ({adj.get('event_type', '')})"
+                )
+            elif adj["action"] == "remove_journey":
+                return f"**{action}**: Journey #{adj['journey_index'] + 1}"
+            return str(adj)
+
+        # Build batch groups
+        batches = []
+        current_batch = []
+        current_bid = None
+        for adj in adjs:
+            bid = adj.get("batch_id")
+            if bid != current_bid and current_batch:
+                batches.append((current_bid, current_batch))
+                current_batch = []
+            current_bid = bid
+            current_batch.append(adj)
+        if current_batch:
+            batches.append((current_bid, current_batch))
+
+        for b_idx, (bid, items) in enumerate(batches):
+            ts = items[0].get("timestamp", "")
+            col_hdr, col_undo = st.columns([5, 1])
+            with col_hdr:
+                if bid is not None:
+                    st.markdown(f"**Batch {b_idx + 1}** — {ts}")
+                else:
+                    st.markdown(f"**Change {b_idx + 1}** — {ts}")
+            with col_undo:
+                if st.button("Undo", key=f"undo_batch_{b_idx}"):
+                    if bid is not None:
+                        st.session_state["manual_adjustments"] = [
+                            a for a in adjs if a.get("batch_id") != bid
+                        ]
+                    else:
+                        # Legacy item — remove first matching
+                        for rm_item in items:
+                            if rm_item in st.session_state["manual_adjustments"]:
+                                st.session_state["manual_adjustments"].remove(
+                                    rm_item
+                                )
+                    st.session_state.pop("_adjusted_identities_cache", None)
+                    st.rerun(scope="app")
+
+            for adj in items:
+                st.markdown(
+                    f"  - {_adj_detail(adj)} · *{adj.get('reason', '')}*"
+                )
+
+
 def _journey_section(identities: dict, cam_a: str, cam_b: str) -> None:
     """Render person-vehicle departure/arrival linkages as a
     horizontal cross-camera timeline: car - garage - garden."""
@@ -830,49 +1620,149 @@ def _journey_section(identities: dict, cam_a: str, cam_b: str) -> None:
     def _st(camera: str):
         return st.session_state.get(f"start_time_{camera}")
 
+    # Combine same-person departure + arrival into round trips
+    # (needed after manual merges that combine two persons)
+    by_person: dict = {}
+    for j in journeys:
+        by_person.setdefault(j["person_id"], []).append(j)
+
+    combined: list = []
+    used_ids: set = set()
+    for pid, pj_list in by_person.items():
+        deps = [j for j in pj_list if j["event"] == "departure"]
+        arrs = [j for j in pj_list if j["event"] == "arrival"]
+        if deps and arrs and deps[0]["event"] != "round_trip":
+            dep = deps[0]
+            arr = arrs[0]
+            combined.append({
+                "person_id": pid,
+                "vehicle_id": arr["vehicle_id"],
+                "event": "round_trip",
+                "vehicle_desc": arr["vehicle_desc"],
+                "person_desc": dep.get("person_desc", ""),
+                "timestamp": dep["timestamp"],
+                "person_ts": dep.get("person_ts", dep["timestamp"]),
+                "gap_seconds": dep.get("gap_seconds", 0),
+                "confidence": round(
+                    (dep["confidence"] + arr["confidence"]) / 2, 3
+                ),
+                "camera": dep["camera"],
+                "person_crop": dep.get("person_crop"),
+                "vehicle_crop": arr.get("vehicle_crop"),
+                "departure": dep,
+                "arrival": arr,
+            })
+            used_ids.add(id(dep))
+            used_ids.add(id(arr))
+
+    journeys = [j for j in journeys if id(j) not in used_ids] + combined
+    journeys.sort(key=lambda j: j["timestamp"])
+
     for j in journeys:
         person = person_map.get(j["person_id"])
         vehicle = vehicle_map.get(j["vehicle_id"])
         if not person:
             continue
 
-        event_label = "departed in" if j["event"] == "departure" else "arrived in"
-        title = (
-            f"Person {j['person_id']} {event_label} "
-            f"Vehicle {j['vehicle_id']} ({j['vehicle_desc']})"
-        )
+        if j["event"] == "round_trip":
+            dep_j = j.get("departure", {})
+            arr_j = j.get("arrival", {})
+            title = (
+                f"Person {j['person_id']} departed and returned in "
+                f"Vehicle {j['vehicle_id']} ({j['vehicle_desc']})"
+            )
+        elif j["event"] == "departure":
+            title = (
+                f"Person {j['person_id']} departed in "
+                f"Vehicle {j['vehicle_id']} ({j['vehicle_desc']})"
+            )
+        else:
+            title = (
+                f"Person {j['person_id']} arrived in "
+                f"Vehicle {j['vehicle_id']} ({j['vehicle_desc']})"
+            )
 
-        # Build chronological timeline steps across cameras
+        # Build chronological timeline — first & last per camera
+        # Shows the full story: vehicle → person on cam A → person on cam B
+        #   → [time passes] → person back on cam B → person on cam A → vehicle
         steps: list = []
 
-        # Vehicle event
         v_crop = j.get("vehicle_crop")
         if not v_crop and vehicle:
             v_crop = vehicle["sightings"][0].get("crop_path")
-        steps.append(
-            {
-                "type": "vehicle",
-                "label": f"Vehicle {j['vehicle_id']}",
-                "camera": j["camera"],
-                "ts": j["timestamp"],
-                "desc": j["vehicle_desc"],
-                "crop": v_crop,
-            }
-        )
 
-        # Person sightings on each camera
-        for s in person["sightings"]:
-            steps.append(
-                {
-                    "type": "person",
-                    "label": f"Person {j['person_id']}",
-                    "camera": s["camera"],
-                    "ts": s["first_ts"],
-                    "ts_end": s["last_ts"],
-                    "desc": s["description"],
-                    "crop": s.get("crop_path"),
-                }
-            )
+        p_sightings = sorted(person["sightings"], key=lambda s: s["first_ts"])
+
+        # Collect first and last sighting per camera
+        first_by_cam: dict = {}
+        last_by_cam: dict = {}
+        for s in p_sightings:
+            cam = s["camera"]
+            if cam not in first_by_cam:
+                first_by_cam[cam] = s
+            last_by_cam[cam] = s
+
+        def _add_person_steps(sightings_list):
+            """Add first & last per camera, chronologically."""
+            # First appearance on each camera (arrival flow)
+            for s in sightings_list:
+                cam = s["camera"]
+                if s is first_by_cam.get(cam):
+                    steps.append({
+                        "type": "person", "label": f"P{j['person_id']}",
+                        "camera": cam, "ts": s["first_ts"],
+                        "desc": s["description"], "crop": s.get("crop_path"),
+                    })
+            # Last appearance on each camera (departure flow) — reverse order
+            for cam in reversed(list(last_by_cam)):
+                last_s = last_by_cam[cam]
+                # Only add if different from the first (person came back)
+                if last_s is not first_by_cam[cam]:
+                    steps.append({
+                        "type": "person", "label": f"P{j['person_id']}",
+                        "camera": cam, "ts": last_s["first_ts"],
+                        "desc": last_s["description"],
+                        "crop": last_s.get("crop_path"),
+                    })
+
+        if j["event"] == "round_trip":
+            dep_j = j.get("departure", {})
+            arr_j = j.get("arrival", {})
+            # Arrival vehicle first (person gets out)
+            arr_v_crop = arr_j.get("vehicle_crop") or v_crop
+            steps.append({
+                "type": "vehicle", "label": f"V{j['vehicle_id']}",
+                "camera": arr_j.get("camera", j["camera"]),
+                "ts": arr_j.get("timestamp", j["timestamp"]) - 1,
+                "desc": f"{j['vehicle_desc']} (arrives)",
+                "crop": arr_v_crop,
+            })
+            _add_person_steps(p_sightings)
+            # Departure vehicle last (person gets in)
+            dep_v_crop = dep_j.get("vehicle_crop") or v_crop
+            steps.append({
+                "type": "vehicle", "label": f"V{j['vehicle_id']}",
+                "camera": dep_j.get("camera", j["camera"]),
+                "ts": dep_j.get("timestamp", j["timestamp"]) + 1,
+                "desc": f"{j['vehicle_desc']} (departs)",
+                "crop": dep_v_crop,
+            })
+        else:
+            if j["event"] == "arrival":
+                steps.append({
+                    "type": "vehicle", "label": f"V{j['vehicle_id']}",
+                    "camera": j["camera"], "ts": j["timestamp"],
+                    "desc": j["vehicle_desc"], "crop": v_crop,
+                })
+
+            _add_person_steps(p_sightings)
+
+            if j["event"] == "departure":
+                steps.append({
+                    "type": "vehicle", "label": f"V{j['vehicle_id']}",
+                    "camera": j["camera"], "ts": j["timestamp"],
+                    "desc": j["vehicle_desc"], "crop": v_crop,
+                })
 
         # Sort chronologically
         steps.sort(key=lambda s: s["ts"])
@@ -1030,7 +1920,7 @@ def page_cross_timeline(cam_a: str, cam_b: str) -> None:
     _ensure_start_time(cam_b)
     st.header("Movement Timeline")
 
-    identities = _get_unified_identities(cam_a, cam_b)
+    identities = _get_adjusted_identities(cam_a, cam_b)
 
     def _st(cam):
         return st.session_state.get(f"start_time_{cam}")
@@ -1453,18 +2343,28 @@ def page_person_of_interest(cameras: Optional[List[str]] = None) -> None:
         "Match sensitivity",
         min_value=0.30,
         max_value=0.80,
-        value=0.45,
+        value=0.50,
         step=0.05,
         help="Lower = more results (looser match). "
         "Higher = fewer but more confident matches.",
     )
 
-    if not uploaded:
+    # Cache uploaded image in session state so tab switches don't lose it
+    if uploaded is not None:
+        raw = uploaded.read()
+        if raw:
+            st.session_state["poi_image_bytes"] = raw
+    elif "poi_image_bytes" in st.session_state:
+        # File uploader cleared — remove cached image
+        del st.session_state["poi_image_bytes"]
+
+    img_bytes = st.session_state.get("poi_image_bytes")
+    if img_bytes is None:
         st.info("Upload a photo to begin searching.")
         return
 
     # Display the reference image
-    file_bytes = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
+    file_bytes = np.asarray(bytearray(img_bytes), dtype=np.uint8)
     ref_img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
     if ref_img is None:
         st.error("Could not read the uploaded image.")
@@ -1478,15 +2378,18 @@ def page_person_of_interest(cameras: Optional[List[str]] = None) -> None:
             use_container_width=True,
         )
 
-    # Extract embedding from reference photo
+    # Extract embedding from reference photo using tracker's OSNet
     with st.spinner("Extracting features..."):
-        from cctv_dissertation.person_reid import PersonReID
+        from cctv_dissertation.tracker import SingleCameraTracker
 
-        reid = PersonReID(
-            db_path=str(PROJECT_ROOT / "data" / "person_reid.db"),
-            device="cpu",
-        )
-        query_emb = reid.extract_features(ref_img)
+        _tracker = SingleCameraTracker(db_path=str(TRACKER_DB))
+        query_emb = _tracker.extract_features(ref_img)
+        if query_emb is None or np.linalg.norm(query_emb) == 0:
+            st.error("Could not extract features from this image.")
+            return
+        norm = np.linalg.norm(query_emb)
+        if norm > 0:
+            query_emb = query_emb / norm
 
     # Compare against all person entities in DB
     if not TRACKER_DB.exists():
@@ -1566,6 +2469,10 @@ def _generate_forensic_pdf(
     date_b: Optional[str],
     video_path_a: Optional[str] = None,
     video_path_b: Optional[str] = None,
+    person_labels: Optional[dict] = None,
+    vehicle_labels: Optional[dict] = None,
+    journey_notes: Optional[dict] = None,
+    examiner_name: str = "System User",
 ) -> bytes:
     """Generate comprehensive forensic PDF with full audit trail and metadata."""
     import hashlib
@@ -1883,7 +2790,7 @@ def _generate_forensic_pdf(
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(*DARK)
     for lbl, value in [
-        ("Examiner", "System User"),
+        ("Examiner", examiner_name),
         ("Examination Date", f"{report_time:%Y-%m-%d}"),
         ("Processing Method", "Automated video analysis pipeline"),
         ("Evidence Integrity", "SHA256 hashes recorded for source files"),
@@ -1911,7 +2818,10 @@ def _generate_forensic_pdf(
         pdf.set_fill_color(*LIGHT_BG)
         pdf.set_font("Helvetica", "B", 12)
         pdf.set_text_color(*DARK)
+        custom_label = (person_labels or {}).get(uid, "")
         title = f"Person {uid}"
+        if custom_label:
+            title += f" ({custom_label})"
         if len(cameras) > 1:
             title += f" - {n_appearances} appearances across {len(cameras)} cameras"
         else:
@@ -1921,12 +2831,19 @@ def _generate_forensic_pdf(
         if matched and sim:
             title += f"  ({sim * 100:.0f}% match)"
         pdf.cell(0, 9, f"  {title}", ln=True, fill=True)
+        if custom_label:
+            pdf.set_font("Helvetica", "I", 9)
+            pdf.set_text_color(*GREY)
+            pdf.cell(0, 5, f"    Label: {custom_label}", ln=True)
+            pdf.set_text_color(*DARK)
         pdf.ln(4)
 
         # Sighting rows
         img_w = 22
+        sighting_block_h = 35  # min height for a sighting block
         for idx, s in enumerate(raw):
-            if pdf.get_y() > 235:
+            # Page break if sighting block won't fit
+            if pdf.get_y() + sighting_block_h > 260:
                 pdf.add_page()
 
             cam_st = _st(s["camera"])
@@ -1934,7 +2851,7 @@ def _generate_forensic_pdf(
             t1 = _format_absolute_time(s["last_ts"], cam_st)
             on_dur = s["last_ts"] - s["first_ts"]
 
-            x_start = pdf.get_x()
+            x_start = pdf.l_margin
             y_start = pdf.get_y()
 
             # Crop image
@@ -1973,17 +2890,21 @@ def _generate_forensic_pdf(
 
             pdf.set_y(max(pdf.get_y(), y_start + 30))
 
-        # Movement path
+        # Movement path — reset x to left margin and wrap properly
         if n_appearances > 1:
             pdf.ln(1)
+            pdf.set_x(pdf.l_margin)
             parts = []
             for s in raw:
                 cam_st = _st(s["camera"])
                 t = _format_absolute_time(s["first_ts"], cam_st)
                 parts.append(f"{s['camera']} @ {t}")
+            trail = "Movement: " + " -> ".join(parts)
             pdf.set_font("Helvetica", "B", 8)
-            pdf.set_text_color(*ACCENT)
-            pdf.multi_cell(0, 4, "Movement: " + " -> ".join(parts))
+            pdf.set_text_color(*RED)
+            # Use page width minus margins for proper wrapping
+            usable_w = pdf.w - pdf.l_margin - pdf.r_margin
+            pdf.multi_cell(usable_w, 4, trail)
             pdf.set_text_color(*DARK)
 
         pdf.ln(4)
@@ -2007,10 +2928,18 @@ def _generate_forensic_pdf(
             pdf.set_fill_color(*LIGHT_BG)
             pdf.set_font("Helvetica", "B", 12)
             pdf.set_text_color(*DARK)
+            custom_label = (vehicle_labels or {}).get(uid, "")
             title = f"Vehicle {uid}"
+            if custom_label:
+                title += f" ({custom_label})"
             if identity["matched"] and sim:
                 title += f"  ({sim * 100:.0f}% match)"
             pdf.cell(0, 9, f"  {title}", ln=True, fill=True)
+            if custom_label:
+                pdf.set_font("Helvetica", "I", 9)
+                pdf.set_text_color(*GREY)
+                pdf.cell(0, 5, f"    Label: {custom_label}", ln=True)
+                pdf.set_text_color(*DARK)
             pdf.ln(4)
 
             x_start = pdf.get_x()
@@ -2060,7 +2989,7 @@ def _generate_forensic_pdf(
         pdf.add_page()
         _section_header("Movement Event Detail")
 
-        for j in journeys:
+        for j_idx, j in enumerate(journeys):
             if pdf.get_y() > 230:
                 pdf.add_page()
 
@@ -2068,7 +2997,21 @@ def _generate_forensic_pdf(
             event_time = _format_absolute_time(j["timestamp"], cam_st)
             person_time = _format_absolute_time(j["person_ts"], cam_st)
 
-            arrow = "departed in" if j["event"] == "departure" else "arrived in"
+            p_label = (person_labels or {}).get(j["person_id"], "")
+            v_label = (vehicle_labels or {}).get(j["vehicle_id"], "")
+            p_name = f"Person {j['person_id']}"
+            if p_label:
+                p_name += f" ({p_label})"
+            v_name = f"Vehicle {j['vehicle_id']}"
+            if v_label:
+                v_name += f" ({v_label})"
+
+            if j["event"] == "round_trip":
+                arrow = "departed and returned in"
+            elif j["event"] == "departure":
+                arrow = "departed in"
+            else:
+                arrow = "arrived in"
 
             pdf.set_fill_color(*LIGHT_BG)
             pdf.set_font("Helvetica", "B", 10)
@@ -2076,15 +3019,21 @@ def _generate_forensic_pdf(
             pdf.cell(
                 0,
                 8,
-                f"  Person {j['person_id']} {arrow} "
-                f"Vehicle {j['vehicle_id']} ({j['vehicle_desc']})",
+                f"  {p_name} {arrow} {v_name} ({j['vehicle_desc']})",
                 ln=True,
                 fill=True,
             )
             pdf.ln(2)
 
             pdf.set_font("Helvetica", "", 9)
-            if j["event"] == "departure":
+            if j["event"] == "round_trip":
+                dep = j.get("departure", {})
+                arr = j.get("arrival", {})
+                dep_t = _format_absolute_time(dep.get("timestamp", 0), cam_st)
+                arr_t = _format_absolute_time(arr.get("timestamp", 0), cam_st)
+                pdf.cell(0, 5, f"  Vehicle arrived: {arr_t}", ln=True)
+                pdf.cell(0, 5, f"  Vehicle departed: {dep_t}", ln=True)
+            elif j["event"] == "departure":
                 pdf.cell(0, 5, f"  Person last seen: {person_time}", ln=True)
                 pdf.cell(0, 5, f"  Vehicle departed: {event_time}", ln=True)
             else:
@@ -2103,6 +3052,14 @@ def _generate_forensic_pdf(
                 ln=True,
             )
             pdf.set_text_color(*DARK)
+
+            # Custom note for this journey
+            note = (journey_notes or {}).get(j_idx, "")
+            if note:
+                pdf.set_font("Helvetica", "I", 9)
+                pdf.set_text_color(*GREY)
+                pdf.cell(0, 5, f"  Note: {note}", ln=True)
+                pdf.set_text_color(*DARK)
 
             pdf.ln(4)
             pdf.set_draw_color(200, 200, 200)
@@ -2211,12 +3168,73 @@ def _generate_forensic_pdf(
             pdf.line(10, pdf.get_y(), 200, pdf.get_y())
             pdf.ln(4)
 
+    # ── Manual Corrections section ──
+    manual_adjs = st.session_state.get("manual_adjustments", [])
+    if manual_adjs:
+        pdf.add_page()
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.set_text_color(*DARK)
+        pdf.cell(0, 10, "Manual Corrections", ln=True)
+        pdf.ln(2)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(*GREY)
+        pdf.cell(
+            0, 5,
+            f"{len(manual_adjs)} manual adjustment(s) applied to automated results.",
+            ln=True,
+        )
+        pdf.ln(4)
+
+        # Table header
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_fill_color(240, 240, 240)
+        col_w = [10, 30, 25, 70, 55]
+        headers = ["#", "Time", "Action", "Details", "Reason"]
+        for i, h in enumerate(headers):
+            pdf.cell(col_w[i], 6, h, border=1, fill=True)
+        pdf.ln()
+
+        pdf.set_font("Helvetica", "", 7)
+        pdf.set_text_color(*DARK)
+        for idx, adj in enumerate(manual_adjs, 1):
+            action = adj["action"].replace("_", " ").title()
+            if adj["action"] == "merge":
+                detail = (
+                    f"{adj['entity_type'].title()} "
+                    f"{adj['source_ids']} -> {adj['target_id']}"
+                )
+            elif adj["action"] == "split":
+                detail = (
+                    f"{adj['entity_type'].title()} {adj['source_id']} "
+                    f"split off {len(adj.get('entity_ids_to_split', []))} sightings"
+                )
+            elif adj["action"] == "add_journey":
+                detail = (
+                    f"P{adj['person_id']} -> V{adj['vehicle_id']} "
+                    f"({adj.get('event_type', '')})"
+                )
+            elif adj["action"] == "remove_journey":
+                detail = f"Removed journey index {adj['journey_index']}"
+            else:
+                detail = str(adj)
+
+            row = [
+                str(idx),
+                adj.get("timestamp", ""),
+                action,
+                detail,
+                adj.get("reason", ""),
+            ]
+            for i, val in enumerate(row):
+                pdf.cell(col_w[i], 5, val[:40], border=1)
+            pdf.ln()
+
     return bytes(pdf.output())
 
 
 def _show_cross_matches_summary(cam_a: str, cam_b: str) -> None:
     """Show unified identities summary below dual view."""
-    identities = _get_unified_identities(cam_a, cam_b)
+    identities = _get_adjusted_identities(cam_a, cam_b)
     persons = identities["persons"]
     vehicles = identities["vehicles"]
 
@@ -2402,7 +3420,7 @@ def page_tamper_detection(cameras: List[str]) -> None:
     st.header("Video Tamper Detection")
     st.caption(
         "Automatic analysis for signs of tampering: frame drops, "
-        "splices, re-encoding artefacts, and timestamp anomalies. "
+        "splices, re-encoding artifacts, and timestamp anomalies. "
         "Results are generated when videos are processed."
     )
 
@@ -2629,6 +3647,7 @@ def page_tamper_detection(cameras: List[str]) -> None:
                 )
 
 
+
 def page_evidence_export(cam_a: str, cam_b: str) -> None:
     """Evidence export package builder page."""
     from cctv_dissertation.evidence_export import ExportConfig, build_evidence_package
@@ -2639,12 +3658,16 @@ def page_evidence_export(cam_a: str, cam_b: str) -> None:
         "crop images, hash manifest, and optional extras."
     )
 
-    identities = _get_unified_identities(cam_a, cam_b)
-    if not identities["persons"] and not identities["vehicles"]:
+    identities = _get_adjusted_identities(cam_a, cam_b)
+    persons = identities.get("persons", [])
+    vehicles = identities.get("vehicles", [])
+    journeys = identities.get("journeys", [])
+
+    if not persons and not vehicles:
         st.info("No tracked entities found. Process videos first.")
         return
 
-    # Options
+    # ── Package Contents ──
     st.subheader("Package Contents")
     col1, col2 = st.columns(2)
     with col1:
@@ -2660,12 +3683,170 @@ def page_evidence_export(cam_a: str, cam_b: str) -> None:
             disabled=not st.session_state.get("tamper_reports"),
         )
 
+    # ── Case Information ──
     st.subheader("Case Information")
     examiner = st.text_input("Examiner Name", value="System User", key="exp_examiner")
     case_notes = st.text_area("Case Notes", value="", key="exp_notes", height=80)
 
-    # Get video paths
-    video_paths = []
+    # ── Report Builder ──
+    st.subheader("Report Builder")
+    st.caption(
+        "Select which entities to include in the forensic PDF "
+        "and add custom labels/descriptions."
+    )
+
+    # Select all / deselect all
+    sel_col1, sel_col2, sel_col3 = st.columns([1, 1, 3])
+    with sel_col1:
+        if st.button("Select All", key="report_select_all"):
+            for p in persons:
+                st.session_state[f"rpt_p_{p['unified_id']}"] = True
+            for v in vehicles:
+                st.session_state[f"rpt_v_{v['unified_id']}"] = True
+            for idx in range(len(journeys)):
+                st.session_state[f"rpt_j_{idx}"] = True
+            st.rerun()
+    with sel_col2:
+        if st.button("Deselect All", key="report_deselect_all"):
+            for p in persons:
+                st.session_state[f"rpt_p_{p['unified_id']}"] = False
+            for v in vehicles:
+                st.session_state[f"rpt_v_{v['unified_id']}"] = False
+            for idx in range(len(journeys)):
+                st.session_state[f"rpt_j_{idx}"] = False
+            st.rerun()
+
+    # --- Person selection ---
+    with st.expander(f"Persons ({len(persons)})", expanded=True):
+        selected_persons: dict = {}
+        person_labels: dict = {}
+        for p in persons:
+            uid = p["unified_id"]
+            sightings = p.get("raw_sightings", p["sightings"])
+            cameras = sorted(set(s["camera"] for s in sightings))
+            n = len(sightings)
+            matched = p.get("matched", False)
+            desc = f"Person {uid}"
+            if len(cameras) > 1:
+                desc += f" - {n} appearances, {len(cameras)} cameras"
+                if matched and p.get("similarity"):
+                    desc += f" ({p['similarity']*100:.0f}% match)"
+            else:
+                cam_name = cameras[0] if cameras else "?"
+                desc += f" - {n} on {cam_name}"
+
+            chk_col, lbl_col = st.columns([1, 2])
+            with chk_col:
+                selected_persons[uid] = st.checkbox(
+                    desc, value=True, key=f"rpt_p_{uid}"
+                )
+            with lbl_col:
+                if selected_persons[uid]:
+                    person_labels[uid] = st.text_input(
+                        "Label",
+                        value="",
+                        key=f"rpt_p_lbl_{uid}",
+                        placeholder="e.g. Suspect A, Homeowner...",
+                        label_visibility="collapsed",
+                    )
+
+    # --- Vehicle selection ---
+    with st.expander(f"Vehicles ({len(vehicles)})", expanded=True):
+        selected_vehicles: dict = {}
+        vehicle_labels: dict = {}
+        for v in vehicles:
+            uid = v["unified_id"]
+            sightings = v["sightings"]
+            v_desc = sightings[0]["description"] if sightings else "unknown"
+            desc = f"Vehicle {uid} ({v_desc})"
+
+            chk_col, lbl_col = st.columns([1, 2])
+            with chk_col:
+                selected_vehicles[uid] = st.checkbox(
+                    desc, value=True, key=f"rpt_v_{uid}"
+                )
+            with lbl_col:
+                if selected_vehicles[uid]:
+                    vehicle_labels[uid] = st.text_input(
+                        "Label",
+                        value="",
+                        key=f"rpt_v_lbl_{uid}",
+                        placeholder="e.g. Silver BMW reg. AB12 CDE...",
+                        label_visibility="collapsed",
+                    )
+
+    # --- Journey / movement event selection ---
+    if journeys:
+        with st.expander(f"Movement Events ({len(journeys)})", expanded=True):
+            selected_journeys: dict = {}
+            journey_notes: dict = {}
+            for idx, j in enumerate(journeys):
+                if j["event"] == "round_trip":
+                    evt = "Round trip"
+                elif j["event"] == "departure":
+                    evt = "Departure"
+                else:
+                    evt = "Arrival"
+                desc = (
+                    f"{evt}: Person {j['person_id']} / "
+                    f"Vehicle {j['vehicle_id']} ({j['vehicle_desc']})"
+                )
+
+                chk_col, lbl_col = st.columns([1, 2])
+                with chk_col:
+                    selected_journeys[idx] = st.checkbox(
+                        desc, value=True, key=f"rpt_j_{idx}"
+                    )
+                with lbl_col:
+                    if selected_journeys[idx]:
+                        journey_notes[idx] = st.text_input(
+                            "Notes",
+                            value="",
+                            key=f"rpt_j_note_{idx}",
+                            placeholder="e.g. Suspect left premises at...",
+                            label_visibility="collapsed",
+                        )
+    else:
+        selected_journeys = {}
+        journey_notes = {}
+
+    # ── Build filtered identities ──
+    filtered_persons = [
+        p for p in persons if selected_persons.get(p["unified_id"], True)
+    ]
+    filtered_vehicles = [
+        v for v in vehicles if selected_vehicles.get(v["unified_id"], True)
+    ]
+    filtered_journeys = [
+        j for idx, j in enumerate(journeys)
+        if selected_journeys.get(idx, True)
+    ]
+    selected_vehicle_ids = {v["unified_id"] for v in filtered_vehicles}
+    filtered_round_trips = [
+        rt for rt in identities.get("round_trips", [])
+        if rt.get("vehicle_id") in selected_vehicle_ids
+    ]
+    filtered_identities = {
+        "persons": filtered_persons,
+        "vehicles": filtered_vehicles,
+        "journeys": filtered_journeys,
+        "round_trips": filtered_round_trips,
+    }
+
+    # Strip empty labels
+    person_labels = {k: v for k, v in person_labels.items() if v}
+    vehicle_labels = {k: v for k, v in vehicle_labels.items() if v}
+    journey_notes = {k: v for k, v in journey_notes.items() if v}
+
+    st.divider()
+    st.caption(
+        f"Report will include: {len(filtered_persons)} person(s), "
+        f"{len(filtered_vehicles)} vehicle(s), "
+        f"{len(filtered_journeys)} movement event(s)"
+    )
+
+    # ── Get video paths ──
+    video_paths: list = []
     if TRACKER_DB.exists():
         conn = sqlite3.connect(str(TRACKER_DB))
         for cam in [cam_a, cam_b]:
@@ -2678,52 +3859,120 @@ def page_evidence_export(cam_a: str, cam_b: str) -> None:
                 video_paths.append(row[0])
         conn.close()
 
-    # Generate PDF bytes (same as identity deep dive)
     start_time_a = st.session_state.get(f"start_time_{cam_a}")
     start_time_b = st.session_state.get(f"start_time_{cam_b}")
     date_a = st.session_state.get(f"start_date_{cam_a}")
     date_b = st.session_state.get(f"start_date_{cam_b}")
 
-    if st.button("Generate Evidence Package", type="primary", key="gen_evidence"):
-        with st.spinner("Building evidence package..."):
-            # Generate fresh PDF
-            pdf_bytes = _generate_forensic_pdf(
-                identities,
-                cam_a,
-                cam_b,
-                start_time_a,
-                start_time_b,
-                date_a,
-                date_b,
-                video_paths[0] if len(video_paths) > 0 else None,
-                video_paths[1] if len(video_paths) > 1 else None,
+    # ── Downloads ──
+    # Track selection state to invalidate cache when selections change
+    _sel_key = (
+        tuple(sorted(p["unified_id"] for p in filtered_persons)),
+        tuple(sorted(v["unified_id"] for v in filtered_vehicles)),
+        tuple(sorted(person_labels.items())),
+        tuple(sorted(vehicle_labels.items())),
+        tuple(sorted(journey_notes.items())),
+        len(filtered_journeys),
+        examiner,
+    )
+
+    # Invalidate cache if selections changed
+    if st.session_state.get("_export_pdf_sel") != _sel_key:
+        st.session_state.pop("_export_pdf_bytes", None)
+        st.session_state.pop("_export_pdf_sel", None)
+    if st.session_state.get("_export_zip_sel") != _sel_key:
+        st.session_state.pop("_export_zip_bytes", None)
+        st.session_state.pop("_export_zip_sel", None)
+
+    def _ensure_pdf():
+        if "_export_pdf_bytes" not in st.session_state:
+            with st.spinner("Generating forensic report..."):
+                st.session_state["_export_pdf_bytes"] = _generate_forensic_pdf(
+                    filtered_identities,
+                    cam_a,
+                    cam_b,
+                    start_time_a,
+                    start_time_b,
+                    date_a,
+                    date_b,
+                    video_paths[0] if len(video_paths) > 0 else None,
+                    video_paths[1] if len(video_paths) > 1 else None,
+                    person_labels=person_labels,
+                    vehicle_labels=vehicle_labels,
+                    journey_notes=journey_notes,
+                    examiner_name=examiner,
+                )
+                st.session_state["_export_pdf_sel"] = _sel_key
+
+    def _ensure_zip():
+        if "_export_zip_bytes" not in st.session_state:
+            _ensure_pdf()
+            with st.spinner("Building evidence package..."):
+                tamper_reports = None
+                if include_tamper and st.session_state.get("tamper_reports"):
+                    tamper_reports = list(
+                        st.session_state["tamper_reports"].values()
+                    )
+                config = ExportConfig(
+                    pdf_bytes=st.session_state["_export_pdf_bytes"],
+                    identities=filtered_identities,
+                    cameras=[cam_a, cam_b],
+                    db_path=str(TRACKER_DB),
+                    tracked_output_dir=str(
+                        PROJECT_ROOT / "data" / "tracked_output"
+                    ),
+                    project_root=str(PROJECT_ROOT),
+                    video_paths=video_paths or None,
+                    tamper_reports=tamper_reports,
+                    include_db=include_db,
+                    include_clips=include_clips,
+                    clips_dir=str(PROJECT_ROOT / "data" / "clips"),
+                    examiner_name=examiner,
+                    case_notes=case_notes,
+                )
+                st.session_state["_export_zip_bytes"] = build_evidence_package(
+                    config
+                )
+                st.session_state["_export_zip_sel"] = _sel_key
+
+    _out_dir = PROJECT_ROOT / "data" / "exports"
+    _out_dir.mkdir(parents=True, exist_ok=True)
+    _pdf_path = _out_dir / "forensic_report.pdf"
+
+    dl_col1, dl_col2, dl_col3 = st.columns(3)
+    with dl_col1:
+        if st.button("Generate Report (PDF)", key="gen_pdf"):
+            # Force regeneration
+            st.session_state.pop("_export_pdf_bytes", None)
+            st.session_state.pop("_export_pdf_sel", None)
+            _ensure_pdf()
+            _pdf_path.write_bytes(st.session_state["_export_pdf_bytes"])
+            st.rerun()
+    with dl_col2:
+        if "_export_pdf_bytes" in st.session_state:
+            st.download_button(
+                label="Download Report (PDF)",
+                data=st.session_state["_export_pdf_bytes"],
+                file_name="forensic_report.pdf",
+                mime="application/pdf",
             )
+            st.caption(f"Also saved to: {_pdf_path}")
+        else:
+            st.info("Click Generate to build the PDF")
+    with dl_col3:
+        if st.button(
+            "Build Evidence Package (ZIP)", type="primary", key="gen_evidence"
+        ):
+            _ensure_zip()
 
-            # Collect tamper reports if selected
-            tamper_reports = None
-            if include_tamper and st.session_state.get("tamper_reports"):
-                tamper_reports = list(st.session_state["tamper_reports"].values())
-
-            config = ExportConfig(
-                pdf_bytes=pdf_bytes,
-                identities=identities,
-                cameras=[cam_a, cam_b],
-                db_path=str(TRACKER_DB),
-                tracked_output_dir=str(PROJECT_ROOT / "data" / "tracked_output"),
-                project_root=str(PROJECT_ROOT),
-                video_paths=video_paths or None,
-                tamper_reports=tamper_reports,
-                include_db=include_db,
-                include_clips=include_clips,
-                clips_dir=str(PROJECT_ROOT / "data" / "clips"),
-                examiner_name=examiner,
-                case_notes=case_notes,
-            )
-
-            zip_bytes = build_evidence_package(config)
-
+    if "_export_zip_bytes" in st.session_state:
+        zip_bytes = st.session_state["_export_zip_bytes"]
         st.success(f"Package ready ({len(zip_bytes) / 1024:.0f} KB)")
-        timestamp = st.session_state.get(f"start_date_{cam_a}", "").replace("-", "")
+        timestamp = st.session_state.get(
+            f"start_date_{cam_a}", ""
+        ).replace("-", "")
+        _zip_path = _out_dir / f"evidence_package_{timestamp}.zip"
+        _zip_path.write_bytes(zip_bytes)
         st.download_button(
             label="Download Evidence Package (ZIP)",
             data=zip_bytes,
@@ -2731,6 +3980,7 @@ def page_evidence_export(cam_a: str, cam_b: str) -> None:
             mime="application/zip",
             type="primary",
         )
+        st.caption(f"Also saved to: {_zip_path}")
 
 
 def page_detections(selected_file, db_path: str) -> None:
@@ -2889,7 +4139,7 @@ def page_detections(selected_file, db_path: str) -> None:
 # ── Upload handlers ───────────────────────────────────────────────
 
 
-def handle_single_upload(uploaded_file) -> None:
+def handle_single_upload(uploaded_file, camera_label: str = "") -> None:
     """Process a single video with ByteTrack tracking."""
     import uuid
 
@@ -2897,7 +4147,7 @@ def handle_single_upload(uploaded_file) -> None:
     target = UPLOADS_DIR / uploaded_file.name
     target.write_bytes(uploaded_file.getbuffer())
 
-    camera_label = target.stem
+    camera_label = camera_label.strip() or target.stem
     run_id = str(uuid.uuid4())[:12]
 
     # Ingest for chain-of-custody
@@ -3015,7 +4265,9 @@ def handle_single_upload(uploaded_file) -> None:
     st.rerun()
 
 
-def handle_cross_upload(file_a, file_b) -> None:
+def handle_cross_upload(
+    file_a, file_b, cam_a_label: str = "", cam_b_label: str = ""
+) -> None:
     """Process two videos for cross-camera tracking."""
     import uuid
 
@@ -3026,8 +4278,8 @@ def handle_cross_upload(file_a, file_b) -> None:
     target_a.write_bytes(file_a.getbuffer())
     target_b.write_bytes(file_b.getbuffer())
 
-    cam_a = target_a.stem
-    cam_b = target_b.stem
+    cam_a = cam_a_label.strip() or target_a.stem
+    cam_b = cam_b_label.strip() or target_b.stem
 
     # Generate a unique run_id for this processing session
     run_id = str(uuid.uuid4())[:12]
@@ -3255,81 +4507,235 @@ def handle_cross_upload(file_a, file_b) -> None:
 
 def main() -> None:
     st.set_page_config(
-        page_title="Forensic Video Toolkit",
+        page_title="Forensic CCTV Intelligence",
         layout="wide",
+        initial_sidebar_state="expanded",
     )
-    st.title("Forensic Video Analysis Dashboard")
 
-    # ── Sidebar: upload mode ──
+    # ── Session init: preserve existing data across browser sessions ──────────
+    if "session_initialized" not in st.session_state:
+        st.session_state["session_initialized"] = True
+        # Check if DB already has tracked data from a previous processing run
+        has_data = False
+        if TRACKER_DB.exists():
+            try:
+                import sqlite3 as _sqlite3
+
+                with _sqlite3.connect(str(TRACKER_DB)) as _c:
+                    (_n,) = _c.execute(
+                        "SELECT COUNT(*) FROM tracked_entities"
+                    ).fetchone()
+                    has_data = _n > 0
+            except Exception:
+                pass
+        st.session_state["session_status"] = "active" if has_data else "fresh"
+
+    # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
-        st.header("Upload Mode")
+        st.markdown("## Forensic CCTV Intelligence")
+
+        # ── Session status & controls ──────────────────────────────────────
+        status = st.session_state.get("session_status", "fresh")
+        _status_colors = {"fresh": "🔵", "active": "🟢", "loaded": "🟠"}
+        _status_labels = {
+            "fresh": "Fresh session — no data loaded",
+            "active": "Active session — analysis in progress",
+            "loaded": "Session restored from file",
+        }
+        st.caption(
+            f"{_status_colors.get(status, '🔵')} {_status_labels.get(status, '')}"
+        )
+
+        st.divider()
+
+        # Save session button (only useful when data exists)
+        _has_data = TRACKER_DB.exists() and TRACKER_DB.stat().st_size > 8192
+        if _has_data:
+            from datetime import datetime
+
+            _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            _zip_name = f"cctv_session_{_ts}.zip"
+            try:
+                _zip_bytes = _build_session_zip()
+                st.download_button(
+                    label="Save Session",
+                    data=_zip_bytes,
+                    file_name=_zip_name,
+                    mime="application/zip",
+                    use_container_width=True,
+                    help="Download session snapshot. Re-upload to restore instantly.",
+                )
+            except Exception as _e:
+                st.error(f"Could not build session file: {_e}")
+        else:
+            st.button(
+                "Save Session",
+                disabled=True,
+                use_container_width=True,
+                help="Process a video first to enable saving.",
+            )
+
+        # Load session uploader
+        with st.expander("Load Previous Session", expanded=not _has_data):
+            st.caption(
+                "Upload a .zip saved from a previous session to restore it "
+                "instantly — no reprocessing needed."
+            )
+            _session_file = st.file_uploader(
+                "Session file (.zip)",
+                type=["zip"],
+                key="session_zip_upload",
+                label_visibility="collapsed",
+            )
+            if _session_file is not None:
+                if st.button(
+                    "Restore Session",
+                    use_container_width=True,
+                    type="primary",
+                    key="restore_btn",
+                ):
+                    with st.spinner("Restoring session..."):
+                        _err = _restore_session_zip(_session_file.getvalue())
+                    if _err:
+                        st.error(_err)
+                    else:
+                        # Clear analysis state so the UI re-reads from restored DB
+                        for _k in [
+                            "upload_mode",
+                            "active_camera",
+                            "cross_cam_a",
+                            "cross_cam_b",
+                            "current_run_id",
+                            "unified_identities_cache",
+                        ]:
+                            st.session_state.pop(_k, None)
+                        st.session_state["session_status"] = "loaded"
+                        st.success("Session restored.")
+                        st.rerun()
+
+        st.divider()
+
+        # ── Analysis mode ──────────────────────────────────────────────────
+        st.subheader("Analysis Mode")
         mode = st.radio(
             "Select mode",
             ["Single Camera", "Cross-Camera (2 videos)"],
             key="mode_radio",
             horizontal=False,
+            label_visibility="collapsed",
         )
 
         st.divider()
 
+        # ── Upload section ─────────────────────────────────────────────────
         if mode == "Single Camera":
             st.subheader("Upload Video")
+            st.caption(
+                "Accepts merged MP4/AVI/MOV/MKV. Use the DVR merger script "
+                "to combine per-minute files before uploading."
+            )
             uploaded = st.file_uploader(
-                "Select video file",
+                "Video file",
                 type=["mp4", "avi", "mov", "mkv"],
                 key="single_upload",
+                label_visibility="collapsed",
             )
+            if uploaded:
+                _default_label = Path(uploaded.name).stem
+                cam_label_in = st.text_input(
+                    "Camera label (optional)",
+                    value=_default_label,
+                    key="single_cam_label",
+                    help="Stored in the database. Defaults to the filename.",
+                )
+            else:
+                cam_label_in = ""
             if st.button(
-                "Process video",
+                "Run Analysis",
                 disabled=uploaded is None,
                 use_container_width=True,
                 type="primary",
             ):
-                if uploaded:
-                    handle_single_upload(uploaded)
+                st.session_state["session_status"] = "active"
+                handle_single_upload(uploaded, camera_label=cam_label_in)
 
         else:
             st.subheader("Upload Two Videos")
+            st.caption(
+                "Camera A = first in the movement path (e.g. garage). "
+                "Camera B = second (e.g. garden)."
+            )
             file_a = st.file_uploader(
-                "Camera A video",
+                "Camera A",
                 type=["mp4", "avi", "mov", "mkv"],
                 key="cross_upload_a",
             )
+            if file_a:
+                _default_a = Path(file_a.name).stem
+                cam_a_label_in = st.text_input(
+                    "Camera A label",
+                    value=_default_a,
+                    key="cross_label_a",
+                    help="e.g. Garage, Front Door",
+                )
+            else:
+                cam_a_label_in = ""
+
             file_b = st.file_uploader(
-                "Camera B video",
+                "Camera B",
                 type=["mp4", "avi", "mov", "mkv"],
                 key="cross_upload_b",
             )
+            if file_b:
+                _default_b = Path(file_b.name).stem
+                cam_b_label_in = st.text_input(
+                    "Camera B label",
+                    value=_default_b,
+                    key="cross_label_b",
+                    help="e.g. Garden, Driveway",
+                )
+            else:
+                cam_b_label_in = ""
+
             if st.button(
-                "Process both videos",
+                "Run Analysis",
                 disabled=(file_a is None or file_b is None),
                 use_container_width=True,
                 type="primary",
             ):
-                if file_a and file_b:
-                    handle_cross_upload(file_a, file_b)
+                st.session_state["session_status"] = "active"
+                handle_cross_upload(
+                    file_a,
+                    file_b,
+                    cam_a_label=cam_a_label_in,
+                    cam_b_label=cam_b_label_in,
+                )
 
-        # Show existing cameras from DB
-        st.divider()
+        # ── Processed cameras in current session ───────────────────────────
         cameras = _query_cameras(TRACKER_DB)
         if cameras:
-            st.subheader("Processed Cameras")
+            st.divider()
+            st.subheader("Cameras in Session")
             for cam in cameras:
                 entities = _query_tracked_entities(TRACKER_DB, cam)
                 persons = sum(1 for e in entities if e["entity_type"] == "person")
                 vehicles = sum(1 for e in entities if e["entity_type"] == "vehicle")
-                st.caption(f"{cam}: {persons}P / {vehicles}V")
+                st.caption(f"**{cam}** — {persons} persons, {vehicles} vehicles")
 
-            st.subheader("Quick Switch")
             if len(cameras) >= 2:
+                st.markdown("**Switch view**")
                 sel_a = st.selectbox("Camera A", cameras, index=0, key="qs_cam_a")
                 sel_b = st.selectbox(
-                    "Camera B", cameras, index=min(1, len(cameras) - 1), key="qs_cam_b"
+                    "Camera B",
+                    cameras,
+                    index=min(1, len(cameras) - 1),
+                    key="qs_cam_b",
                 )
                 if st.button(
-                    "Cross-camera view",
+                    "Cross-Camera View",
                     use_container_width=True,
                     key="switch_cross",
+                    type="primary",
                 ):
                     st.session_state["cross_cam_a"] = sel_a
                     st.session_state["cross_cam_b"] = sel_b
@@ -3337,7 +4743,7 @@ def main() -> None:
                     st.rerun()
             for cam in cameras:
                 if st.button(
-                    f"Single: {cam}",
+                    f"Single view: {cam}",
                     use_container_width=True,
                     key=f"switch_{cam}",
                 ):
@@ -3345,11 +4751,11 @@ def main() -> None:
                     st.session_state["upload_mode"] = "single"
                     st.rerun()
 
-        # Legacy detection report selector
-        st.divider()
+        # Legacy detection reports (kept for backwards compatibility)
         detection_files = list_detection_files()
         if detection_files:
-            st.subheader("Detection Reports")
+            st.divider()
+            st.caption("Legacy Detection Reports")
             selected_det = st.selectbox(
                 "Report",
                 detection_files,
@@ -3359,33 +4765,34 @@ def main() -> None:
         else:
             selected_det = None
 
-    # ── Main content area ──
+    # ── Main content area ─────────────────────────────────────────────────────
     upload_mode = st.session_state.get("upload_mode", "")
 
     if upload_mode == "single":
         camera = st.session_state.get("active_camera", "")
         if camera:
+            st.title(f"Analysis — {camera}")
             (
-                tab_track,
                 tab_summary,
+                tab_track,
                 tab_search,
                 tab_poi,
                 tab_tamper,
                 tab_detect,
             ) = st.tabs(
                 [
-                    "Tracking",
                     "Summary",
+                    "Tracking",
                     "Search",
                     "Person of Interest",
                     "Tamper Detection",
                     "Detections",
                 ]
             )
-            with tab_track:
-                page_single_tracking(camera)
             with tab_summary:
                 page_single_summary(camera)
+            with tab_track:
+                page_single_tracking(camera)
             with tab_search:
                 page_search([camera])
             with tab_poi:
@@ -3395,16 +4802,18 @@ def main() -> None:
             with tab_detect:
                 page_detections(selected_det, str(DEFAULT_DB_PATH))
         else:
-            st.info("Upload a video to get started.")
+            st.info("Select a camera from the sidebar to view its analysis.")
 
     elif upload_mode == "cross":
         cam_a = st.session_state.get("cross_cam_a", "")
         cam_b = st.session_state.get("cross_cam_b", "")
         if cam_a and cam_b:
+            st.title(f"Cross-Camera Analysis — {cam_a} / {cam_b}")
             (
-                tab_dual,
                 tab_id,
+                tab_adjust,
                 tab_timeline,
+                tab_dual,
                 tab_search,
                 tab_poi,
                 tab_tamper,
@@ -3413,9 +4822,10 @@ def main() -> None:
                 tab_sum_b,
             ) = st.tabs(
                 [
-                    "Dual View",
                     "Identity Deep Dive",
+                    "Manual Adjustments",
                     "Timeline",
+                    "Dual View",
                     "Search",
                     "Person of Interest",
                     "Tamper Detection",
@@ -3424,12 +4834,14 @@ def main() -> None:
                     f"Summary: {cam_b}",
                 ]
             )
-            with tab_dual:
-                page_cross_dual_view(cam_a, cam_b)
             with tab_id:
                 page_cross_identity(cam_a, cam_b)
+            with tab_adjust:
+                page_manual_adjustments(cam_a, cam_b)
             with tab_timeline:
                 page_cross_timeline(cam_a, cam_b)
+            with tab_dual:
+                page_cross_dual_view(cam_a, cam_b)
             with tab_search:
                 page_search([cam_a, cam_b])
             with tab_poi:
@@ -3443,43 +4855,74 @@ def main() -> None:
             with tab_sum_b:
                 page_single_summary(cam_b)
         else:
-            st.info("Upload two videos to enable cross-camera analysis.")
+            st.info(
+                "Select two cameras from the sidebar to enable cross-camera analysis."
+            )
+
     else:
-        # Default view — show existing data or prompt to upload
-        _rid = st.session_state.get("current_run_id")
-        cameras = _query_cameras(TRACKER_DB, run_id=_rid)
-        if not cameras:
-            # Fallback: load most recent run_id from DB
-            if TRACKER_DB.exists():
-                _conn = sqlite3.connect(str(TRACKER_DB))
-                _row = _conn.execute(
-                    "SELECT run_id FROM tracked_entities "
-                    "WHERE run_id IS NOT NULL "
-                    "ORDER BY created_at DESC LIMIT 1"
-                ).fetchone()
-                _conn.close()
-                if _row:
-                    st.session_state["current_run_id"] = _row[0]
-                    cameras = _query_cameras(TRACKER_DB, run_id=_row[0])
-            if not cameras:
-                cameras = _query_cameras(TRACKER_DB)
-        if cameras:
-            if len(cameras) >= 2:
-                # Auto-load cross-camera view
-                st.session_state["cross_cam_a"] = cameras[0]
-                st.session_state["cross_cam_b"] = cameras[1]
+        # ── Landing page / auto-restore ───────────────────────────────────
+        cameras_in_db = _query_cameras(TRACKER_DB)
+
+        if cameras_in_db:
+            # Data exists (restored session) — auto-navigate to analysis view
+            if len(cameras_in_db) >= 2:
+                st.session_state["cross_cam_a"] = cameras_in_db[0]
+                st.session_state["cross_cam_b"] = cameras_in_db[1]
                 st.session_state["upload_mode"] = "cross"
                 st.rerun()
-            elif len(cameras) == 1:
-                st.session_state["active_camera"] = cameras[0]
+            else:
+                st.session_state["active_camera"] = cameras_in_db[0]
                 st.session_state["upload_mode"] = "single"
                 st.rerun()
-        elif detection_files:
-            tab_detect = st.tabs(["Detections"])[0]
-            with tab_detect:
-                page_detections(selected_det, str(DEFAULT_DB_PATH))
+
         else:
-            st.info("Upload a video using the sidebar to begin analysis.")
+            # Fresh session landing page
+            st.title("Forensic CCTV Intelligence")
+            st.markdown(
+                "Automated movement tracking, identity matching, and forensic "
+                "reporting across multiple camera feeds."
+            )
+            st.divider()
+
+            col_new, col_load = st.columns(2, gap="large")
+
+            with col_new:
+                st.markdown("### New Analysis")
+                st.markdown(
+                    "Upload one or two merged video files using the sidebar. "
+                    "The system will automatically:\n\n"
+                    "- Detect and track all persons and vehicles\n"
+                    "- Build cross-camera identity matches\n"
+                    "- Extract timestamps and movement timelines\n"
+                    "- Run tamper detection on the footage\n"
+                    "- Generate a court-ready evidence package"
+                )
+                st.info(
+                    "Use the **DVR merger script** to combine per-minute files "
+                    "into a single video before uploading.",
+                    icon="ℹ️",
+                )
+
+            with col_load:
+                st.markdown("### Restore a Session")
+                st.markdown(
+                    "Have a previously saved session file? Upload it using "
+                    "**Load Previous Session** in the sidebar to restore all "
+                    "tracked entities, identities, and analysis results "
+                    "instantly — no reprocessing required."
+                )
+                st.success(
+                    "Session files (.zip) contain the full tracking database "
+                    "and all crop images. Original video files are not required "
+                    "to restore a session.",
+                    icon="✅",
+                )
+
+            st.divider()
+            st.caption(
+                "Forensic CCTV Intelligence — "
+                "ByteTrack · OSNet Re-ID · YOLOv8 · EasyOCR"
+            )
 
 
 if __name__ == "__main__":

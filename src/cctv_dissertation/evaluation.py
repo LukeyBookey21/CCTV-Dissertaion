@@ -35,6 +35,13 @@ class EvaluationResult:
     reid_false_positives: int = 0  # Incorrectly matched (different people)
     reid_false_negatives: int = 0  # Same person not matched across cameras
 
+    # Identity-level metrics
+    gt_identities: int = 0  # Number of ground truth identities
+    sys_identities: int = 0  # Number of system unified identities
+    correct_identities: int = 0  # System IDs mapping to exactly 1 GT, sole owner
+    over_fragmented: int = 0  # GT persons split across multiple system IDs
+    over_merged: int = 0  # System IDs grouping different GT persons
+
     # Detailed breakdowns
     per_camera_results: Dict[str, dict] = field(default_factory=dict)
     confusion_matrix: Dict[str, Dict[str, int]] = field(default_factory=dict)
@@ -110,6 +117,13 @@ class EvaluationResult:
                 "precision": round(self.reid_precision, 4),
                 "recall": round(self.reid_recall, 4),
                 "f1_score": round(self.reid_f1, 4),
+            },
+            "identity": {
+                "gt_identities": self.gt_identities,
+                "sys_identities": self.sys_identities,
+                "correct": self.correct_identities,
+                "over_fragmented": self.over_fragmented,
+                "over_merged": self.over_merged,
             },
             "per_camera": self.per_camera_results,
         }
@@ -201,8 +215,8 @@ def extract_system_tracks(
             te.track_id,
             te.entity_type,
             te.description,
-            MIN(tf.frame_number) as first_frame,
-            MAX(tf.frame_number) as last_frame
+            MIN(tf.frame_idx) as first_frame,
+            MAX(tf.frame_idx) as last_frame
         FROM tracked_entities te
         JOIN track_frames tf ON te.id = tf.entity_id
     """
@@ -232,26 +246,45 @@ def extract_system_tracks(
     return dict(result)
 
 
-def extract_unified_identities(db_path: str) -> Dict[str, List[dict]]:
+def extract_unified_identities(
+    db_path: str, cameras: Optional[List[str]] = None
+) -> Dict[str, List[dict]]:
     """Extract unified identities from build_unified_identities output.
 
     Returns dict mapping unified_id -> list of appearances across cameras.
     """
     from cctv_dissertation.tracker import build_unified_identities
 
-    identities = build_unified_identities(db_path)
+    # Determine cameras from DB if not provided
+    if not cameras or len(cameras) < 2:
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        cameras = [
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT camera_label FROM tracked_entities"
+            ).fetchall()
+        ]
+        conn.close()
+        if len(cameras) < 2:
+            return {}
+
+    identities = build_unified_identities(db_path, cameras[0], cameras[1])
 
     result = {}
-    for uid, data in identities.items():
-        result[uid] = []
-        for appearance in data.get("appearances", []):
-            result[uid].append(
-                {
-                    "camera": appearance.get("camera"),
-                    "track_id": appearance.get("track_id"),
-                    "description": appearance.get("description", ""),
-                }
-            )
+    for entity_type in ("persons", "vehicles"):
+        for entity in identities.get(entity_type, []):
+            uid = f"{'P' if entity_type == 'persons' else 'V'}{entity['unified_id']}"
+            result[uid] = []
+            for sighting in entity.get("sightings", []):
+                result[uid].append(
+                    {
+                        "camera": sighting.get("camera"),
+                        "track_id": sighting.get("track_id"),
+                        "description": sighting.get("description", ""),
+                    }
+                )
 
     return result
 
@@ -417,7 +450,8 @@ def evaluate_reid(
                 gt_pairs.add((entity_id, pair[0], pair[1]))
 
     # Get system unified identities
-    sys_identities = extract_unified_identities(db_path)
+    cameras = ground_truth.get("metadata", {}).get("cameras", [])
+    sys_identities = extract_unified_identities(db_path, cameras)
 
     # Match system pairs to ground truth pairs
     # A system pair is correct if it links the same ground truth entity
@@ -431,48 +465,64 @@ def evaluate_reid(
     for gt_id, sys_track, camera in tracking_result.matched_pairs:
         sys_to_gt[(camera, sys_track)] = gt_id
 
-    # Now evaluate each system unified identity
-    for uid, appearances in sys_identities.items():
-        if not uid.startswith("P" if entity_type == "person" else "V"):
-            continue
+    # Build bidirectional mapping: sys_uid -> set(gt_ids), gt_id -> set(sys_uids)
+    prefix = "P" if entity_type == "person" else "V"
+    sys_uid_to_gt: Dict[str, set] = {}
+    gt_to_sys_uids: Dict[str, set] = defaultdict(set)
 
-        # Find which GT entities this unified ID maps to
+    for uid, appearances in sys_identities.items():
+        if not uid.startswith(prefix):
+            continue
         gt_ids_in_unified = set()
         for app in appearances:
             key = (app["camera"], app["track_id"])
             if key in sys_to_gt:
                 gt_ids_in_unified.add(sys_to_gt[key])
+        sys_uid_to_gt[uid] = gt_ids_in_unified
+        for gt_id in gt_ids_in_unified:
+            gt_to_sys_uids[gt_id].add(uid)
 
-        if len(gt_ids_in_unified) == 1:
-            # Correct: all appearances map to same GT entity
-            gt_id = list(gt_ids_in_unified)[0]
-            cameras = [a["camera"] for a in appearances]
-            cameras = list(set(cameras))
-            if len(cameras) > 1:
-                result.reid_true_positives += 1
-        elif len(gt_ids_in_unified) > 1:
-            # Incorrect: merged different GT entities
-            result.reid_false_positives += 1
+    # Identity-level metrics
+    result.gt_identities = len(gt_entities)
+    result.sys_identities = len(sys_uid_to_gt)
 
-    # Count GT pairs that weren't matched (false negatives)
-    # These are GT entities appearing in multiple cameras that system didn't unify
+    # Over-merged: system UID groups different GT persons
+    for uid, gt_ids in sys_uid_to_gt.items():
+        if len(gt_ids) > 1:
+            result.over_merged += 1
+
+    # Over-fragmented: GT person split across multiple system UIDs
+    for gt_id, sys_uids in gt_to_sys_uids.items():
+        if len(sys_uids) > 1:
+            result.over_fragmented += 1
+        elif len(sys_uids) == 1:
+            uid = list(sys_uids)[0]
+            if len(sys_uid_to_gt.get(uid, set())) == 1:
+                result.correct_identities += 1
+
+    # Re-ID: cross-camera matching evaluation
+    # TP: GT cross-camera person fully covered by a SINGLE system UID
+    # FN: GT cross-camera person NOT fully covered by any single system UID
+    # FP: System UID groups appearances from different GT persons across cameras
     for gt_id, c1, c2 in gt_pairs:
-        # Check if system unified these
-        found = False
-        for uid, appearances in sys_identities.items():
-            app_cameras = set(a["camera"] for a in appearances)
+        found_single_uid = False
+        for uid in gt_to_sys_uids.get(gt_id, set()):
+            app_cameras = set(a["camera"] for a in sys_identities.get(uid, []))
+            # This UID must cover both cameras AND only map to this GT person
             if c1 in app_cameras and c2 in app_cameras:
-                # Check if this unified ID maps to our GT entity
-                for app in appearances:
-                    key = (app["camera"], app["track_id"])
-                    if sys_to_gt.get(key) == gt_id:
-                        found = True
-                        break
-            if found:
-                break
-
-        if not found:
+                if len(sys_uid_to_gt.get(uid, set())) == 1:
+                    found_single_uid = True
+                    break
+        if found_single_uid:
+            result.reid_true_positives += 1
+        else:
             result.reid_false_negatives += 1
+
+    for uid, gt_ids in sys_uid_to_gt.items():
+        if len(gt_ids) > 1:
+            app_cameras = set(a["camera"] for a in sys_identities.get(uid, []))
+            if len(app_cameras) > 1:
+                result.reid_false_positives += 1
 
     # Copy tracking results
     result.true_positives = tracking_result.true_positives

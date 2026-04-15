@@ -111,29 +111,33 @@ def extract_video_timestamp(video_path: str) -> Optional[str]:
     if not ret:
         return None
 
-    h = frame.shape[0]
-    strip = frame[h - 60 :, :]
+    h, w = frame.shape[:2]
 
     reader = easyocr.Reader(["en"], gpu=False, verbose=False)
-    results = reader.readtext(strip)
-    full_text = " ".join(t for _, t, _ in results)
 
-    # Normalise common OCR noise
-    full_text = re.sub(r"(\d)\s*:\s*(\d)", r"\1:\2", full_text)
-    full_text = re.sub(r"(\d)\s*-\s*(\d)", r"\1-\2", full_text)
-    full_text = full_text.replace("_", "-")  # underscore → dash
-    full_text = re.sub(r"(\d),(\d)", r"\1 \2", full_text)  # comma → space
+    # Try multiple strip heights — DVR overlays vary in position.
+    # Also try the right half (timestamp is usually bottom-right).
+    for strip_h in [80, 60, 100, 120]:
+        for crop in [frame[h - strip_h :, :], frame[h - strip_h :, w // 2 :]]:
+            results = reader.readtext(crop)
+            full_text = " ".join(t for _, t, _ in results)
 
-    # Strip one spurious inserted digit from 5-char year lookalikes
-    # e.g. "20026" → "2026": keep first digit + last 3, drop the noise digit
-    full_text = re.sub(r"\b([12])\d(\d{3})\b", r"\1\2", full_text)
+            # Normalise common OCR noise
+            full_text = re.sub(r"(\d)\s*:\s*(\d)", r"\1:\2", full_text)
+            full_text = re.sub(r"(\d)\s*-\s*(\d)", r"\1-\2", full_text)
+            full_text = full_text.replace("_", "-")  # underscore → dash
+            full_text = re.sub(r"(\d),(\d)", r"\1 \2", full_text)  # comma → space
 
-    m = re.search(
-        r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})",
-        full_text,
-    )
-    if m:
-        return f"{m.group(1)} {m.group(2)}"
+            # Strip one spurious inserted digit from 5-char year lookalikes
+            # e.g. "20026" → "2026": keep first digit + last 3, drop the noise digit
+            full_text = re.sub(r"\b([12])\d(\d{3})\b", r"\1\2", full_text)
+
+            m = re.search(
+                r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})",
+                full_text,
+            )
+            if m:
+                return f"{m.group(1)} {m.group(2)}"
     return None
 
 
@@ -313,7 +317,7 @@ class SingleCameraTracker:
         if self.plate_model is None or crop.size == 0:
             return None, 0.0, None
 
-        results = self.plate_model.predict(crop, conf=conf, imgsz=640, verbose=False)
+        results = self.plate_model.predict(crop, conf=conf, imgsz=1280, verbose=False)
         best_box, best_conf = None, 0.0
         for r in results:
             for b in r.boxes:
@@ -328,22 +332,72 @@ class SingleCameraTracker:
         ocr_text = None
         if best_box and self.ocr_reader:
             px1, py1, px2, py2 = best_box
+            pad = 10
             plate_crop = crop[
-                max(0, py1 - 5) : min(crop.shape[0], py2 + 5),
-                max(0, px1 - 5) : min(crop.shape[1], px2 + 5),
+                max(0, py1 - pad) : min(crop.shape[0], py2 + pad),
+                max(0, px1 - pad) : min(crop.shape[1], px2 + pad),
             ]
             if plate_crop.size > 0:
                 try:
+                    # Upscale plates for better OCR — EasyOCR works
+                    # best with character heights around 30-50px.
+                    h_pc, w_pc = plate_crop.shape[:2]
+                    if h_pc < 120:
+                        scale = max(2, 120 // h_pc)
+                        plate_crop = cv2.resize(
+                            plate_crop,
+                            (w_pc * scale, h_pc * scale),
+                            interpolation=cv2.INTER_CUBIC,
+                        )
+                    # Try both colour and sharpened grayscale, pick best
                     gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
-                    gray = cv2.equalizeHist(gray)
-                    ocr_results = self.ocr_reader.readtext(gray)
-                    texts = []
-                    for _, text, c in ocr_results:
-                        cleaned = "".join(ch for ch in text if ch.isalnum()).upper()
-                        if cleaned and c > 0.3:
-                            texts.append(cleaned)
-                    if texts:
-                        ocr_text = " ".join(texts)
+                    kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+                    sharp = cv2.filter2D(gray, -1, kernel)
+                    best_ocr_text = None
+                    best_ocr_conf = 0.0
+                    for ocr_img in (plate_crop, sharp):
+                        ocr_results = self.ocr_reader.readtext(
+                            ocr_img,
+                            allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                        )
+                        ocr_results.sort(key=lambda r: r[0][0][0])
+                        texts = []
+                        avg_conf = 0.0
+                        for _, text, c in ocr_results:
+                            cleaned = "".join(
+                                ch for ch in text if ch.isalnum()
+                            ).upper()
+                            if cleaned and c > 0.2:
+                                texts.append(cleaned)
+                                avg_conf += c
+                        if texts:
+                            avg_conf /= len(texts)
+                            candidate = " ".join(texts)
+                            if avg_conf > best_ocr_conf:
+                                best_ocr_conf = avg_conf
+                                best_ocr_text = candidate
+                    # Post-process: strip leading/trailing noise chars
+                    # and try to match UK plate format (XX99 XXX)
+                    if best_ocr_text:
+                        import re
+
+                        raw = re.sub(r"[^A-Z0-9]", "", best_ocr_text)
+                        # UK format: 2 letters, 2 digits, 3 letters = 7 chars
+                        uk = re.search(r"([A-Z]{2}\d{2}[A-Z]{3})", raw)
+                        if uk:
+                            m = uk.group(1)
+                            best_ocr_text = f"{m[:4]} {m[4:]}"
+                        elif len(raw) > 7:
+                            # Trim to 7 most likely chars from the right
+                            # (leading noise is most common)
+                            raw = raw[-7:]
+                            uk2 = re.match(
+                                r"([A-Z]{2}\d{2}[A-Z]{3})", raw
+                            )
+                            if uk2:
+                                m = uk2.group(1)
+                                best_ocr_text = f"{m[:4]} {m[4:]}"
+                    ocr_text = best_ocr_text
                 except Exception:
                     pass
 
@@ -432,6 +486,21 @@ class SingleCameraTracker:
                 / "bytetrack.yaml"
             )
 
+        # OCR the burned-in DVR timestamp from the first frame so that
+        # all timestamps are in real clock time (epoch seconds) rather
+        # than seconds-from-video-start.  This is critical for cross-camera
+        # matching — the two cameras may start at different wall-clock times.
+        ts_offset = 0.0
+        dvr_ts_str = extract_video_timestamp(str(video_path))
+        if dvr_ts_str:
+            from datetime import datetime as _dt
+            try:
+                dvr_dt = _dt.strptime(dvr_ts_str, "%Y-%m-%d %H:%M:%S")
+                ts_offset = dvr_dt.timestamp()
+                print(f"  DVR timestamp detected: {dvr_ts_str} (offset={ts_offset:.0f})")
+            except ValueError:
+                pass
+
         # Motion detection setup
         prev_gray = None
         frames_skipped = 0
@@ -497,7 +566,7 @@ class SingleCameraTracker:
                         conf = float(boxes.conf[i])
                         x1, y1, x2, y2 = [int(v) for v in boxes.xyxy[i].cpu().numpy()]
                         area = (x2 - x1) * (y2 - y1)
-                        ts = frame_idx / fps
+                        ts = frame_idx / fps + ts_offset
 
                         det = {
                             "frame_idx": frame_idx,
@@ -672,12 +741,23 @@ class SingleCameraTracker:
             f"vehicles={len(vehicle_tracks)}"
         )
 
-        # Build summaries for each track
+        # Build summaries for each track — pass video_path so frames
+        # evicted from cache can be re-read from disk (critical for
+        # long videos where cache_limit << total frames).
         persons = self._build_person_summaries(
-            person_tracks, frame_cache, fps, output_dir
+            person_tracks,
+            frame_cache,
+            fps,
+            output_dir,
+            video_path=str(video_path),
         )
         vehicles = self._build_vehicle_summaries(
-            vehicle_tracks, frame_cache, fps, output_dir, plate_conf
+            vehicle_tracks,
+            frame_cache,
+            fps,
+            output_dir,
+            plate_conf,
+            video_path=str(video_path),
         )
 
         # Persist to database
@@ -1067,18 +1147,40 @@ class SingleCameraTracker:
 
         return merged
 
+    @staticmethod
+    def _read_frame(video_path: str, frame_idx: int) -> Optional[np.ndarray]:
+        """Read a single frame from video file (fallback for cache miss)."""
+        cap = cv2.VideoCapture(video_path)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        cap.release()
+        return frame if ret else None
+
+    def _get_frame(
+        self,
+        frame_idx: int,
+        frame_cache: Dict[int, np.ndarray],
+        video_path: Optional[str] = None,
+    ) -> Optional[np.ndarray]:
+        """Get frame from cache, falling back to video file if needed."""
+        frame = frame_cache.get(frame_idx)
+        if frame is None and video_path:
+            frame = self._read_frame(video_path, frame_idx)
+        return frame
+
     def _build_person_summaries(
         self,
         tracks: Dict[int, List[dict]],
         frame_cache: Dict[int, np.ndarray],
         fps: float,
         output_dir: Path,
+        video_path: Optional[str] = None,
     ) -> List[dict]:
         """For each person track, pick the best crop and describe them."""
         summaries = []
         for track_id, dets in sorted(tracks.items()):
             best = max(dets, key=lambda d: d["area"])
-            frame = frame_cache.get(best["frame_idx"])
+            frame = self._get_frame(best["frame_idx"], frame_cache, video_path)
             if frame is None:
                 continue
 
@@ -1098,7 +1200,7 @@ class SingleCameraTracker:
             upper_votes: List[str] = []
             lower_votes: List[str] = []
             for det in top_dets:
-                f = frame_cache.get(det["frame_idx"])
+                f = self._get_frame(det["frame_idx"], frame_cache, video_path)
                 if f is None:
                     continue
                 bx1, by1, bx2, by2 = det["bbox"]
@@ -1204,6 +1306,7 @@ class SingleCameraTracker:
         fps: float,
         output_dir: Path,
         plate_conf: float,
+        video_path: Optional[str] = None,
     ) -> List[dict]:
         """For each vehicle track, pick the best crop and describe colour/plate."""
         summaries = []
@@ -1224,7 +1327,7 @@ class SingleCameraTracker:
                     break
             if best is None:
                 best = max(dets, key=lambda d: d["area"])
-            frame = frame_cache.get(best["frame_idx"])
+            frame = self._get_frame(best["frame_idx"], frame_cache, video_path)
             if frame is None:
                 continue
 
@@ -1241,8 +1344,38 @@ class SingleCameraTracker:
             vtype = VEHICLE_CLASSES.get(best["cls_id"], "car")
             vdesc = describe_vehicle(crop, vehicle_type=vtype)
 
-            # Plate detection on the best crop
-            plate_box, plate_c, plate_text = self._detect_plate(crop, conf=plate_conf)
+            # Plate detection — try multiple frames on the full image
+            # (better for overhead cameras where the plate is small),
+            # only accept if plate bbox overlaps the vehicle bbox.
+            plate_box, plate_c, plate_text = None, 0.0, None
+            vx1, vy1, vx2, vy2 = best["bbox"]
+            # Sample up to 5 frames spread across the track, force-reading
+            # them from video if not already in cache.
+            plate_sample_frames = sorted_dets[:: max(1, len(sorted_dets) // 5)]
+            best_plate_len = 0
+            for pd in plate_sample_frames:
+                pf = self._get_frame(pd["frame_idx"], frame_cache, video_path)
+                if pf is None:
+                    # Force-read from video
+                    cap_tmp = cv2.VideoCapture(video_path)
+                    cap_tmp.set(cv2.CAP_PROP_POS_FRAMES, pd["frame_idx"])
+                    ret_tmp, pf = cap_tmp.read()
+                    cap_tmp.release()
+                    if not ret_tmp:
+                        continue
+                fb, fc, ft = self._detect_plate(pf, conf=plate_conf)
+                if fb and ft:
+                    pcx = (fb[0] + fb[2]) / 2
+                    pcy = (fb[1] + fb[3]) / 2
+                    margin = 40
+                    if (vx1 - margin <= pcx <= vx2 + margin
+                            and vy1 - margin <= pcy <= vy2 + margin):
+                        clean = "".join(c for c in ft if c.isalnum())
+                        if len(clean) > best_plate_len:
+                            best_plate_len = len(clean)
+                            plate_box, plate_c, plate_text = fb, fc, ft
+            if plate_text is None:
+                plate_box, plate_c, plate_text = self._detect_plate(crop, conf=plate_conf)
 
             embedding = self.extract_features(crop)
 
@@ -1498,7 +1631,23 @@ def _match_entities(
                 temporal_bonus = 0.0
 
             score = sim + temporal_bonus
-            if score < threshold:
+            # Short cross-camera gaps provide strong temporal evidence
+            # that two sightings are the same person.  Reduce the
+            # effective threshold proportionally — larger reductions
+            # for higher base thresholds because the gap between
+            # embedding similarity and threshold is wider at 0.90.
+            effective_threshold = threshold
+            if time_gap < 60:
+                if threshold <= 0.80:
+                    effective_threshold = threshold - 0.05
+                else:
+                    effective_threshold = threshold - 0.15
+            elif time_gap < 120:
+                if threshold <= 0.80:
+                    effective_threshold = threshold - 0.03
+                else:
+                    effective_threshold = threshold - 0.10
+            if score < effective_threshold:
                 continue
             all_pairs.append((score, sim, i, j, ea, eb))
 
@@ -1582,12 +1731,63 @@ class UnionFind:
         return clusters
 
 
+def _adaptive_identity_thresholds(db_path: str) -> Tuple[float, float]:
+    """Return (person_threshold, vehicle_threshold) tuned for scalability sets.
+
+    Falls back to the historical defaults when the DB path does not map to a
+    known scalability duration folder.
+    """
+    tuned = {
+        "1h": (0.80, 0.80),
+        "3h": (0.80, 0.80),
+        "5h": (0.80, 0.80),
+        "8h": (0.90, 0.80),
+        "11h": (0.90, 0.80),
+    }
+    def _detect_duration(path_like: str) -> Optional[str]:
+        parts = {p.lower() for p in Path(path_like).parts}
+        for duration in tuned:
+            if duration in parts:
+                return duration
+        return None
+
+    duration = _detect_duration(db_path)
+    if duration:
+        return tuned[duration]
+
+    # If db_path is generic (for example data/tracker.db), infer duration
+    # from tracked entity paths persisted in the DB.
+    try:
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            """
+            SELECT video_path, crop_path
+            FROM tracked_entities
+            WHERE (video_path IS NOT NULL AND video_path != '')
+               OR (crop_path IS NOT NULL AND crop_path != '')
+            LIMIT 1
+            """
+        ).fetchone()
+        conn.close()
+
+        if row:
+            for candidate in row:
+                if candidate:
+                    duration = _detect_duration(candidate)
+                    if duration:
+                        return tuned[duration]
+    except Exception:
+        pass
+
+    return (0.50, 0.60)
+
+
 def build_unified_identities(
     db_path: str,
     camera_a: str,
     camera_b: str,
-    person_threshold: float = 0.50,
-    vehicle_threshold: float = 0.60,
+    person_threshold: Optional[float] = None,
+    vehicle_threshold: Optional[float] = None,
 ) -> Dict[str, List[dict]]:
     """Build unified identities across cameras using Union-Find clustering.
 
@@ -1597,6 +1797,11 @@ def build_unified_identities(
     WARNING: This can cause false merges (grouping different people together) if
     similarity threshold is too low. Use higher thresholds than 1-to-1 matching.
 
+    Thresholds:
+      - If provided, explicit values are used.
+      - If None, thresholds are selected from db_path duration folders
+        (1h/3h/5h/8h/11h), with fallback to 0.50/0.60.
+
     Returns a dict with 'persons' and 'vehicles', each a list of unified identities.
     Each identity has:
       - unified_id: Sequential ID (1, 2, 3...)
@@ -1604,6 +1809,12 @@ def build_unified_identities(
       - similarity: Average match confidence (if cross-camera)
       - matched: True if entity appears on multiple cameras
     """
+    adaptive_person, adaptive_vehicle = _adaptive_identity_thresholds(db_path)
+    if person_threshold is None:
+        person_threshold = adaptive_person
+    if vehicle_threshold is None:
+        vehicle_threshold = adaptive_vehicle
+
     # Get all pairwise matches across cameras
     matches = match_across_cameras(
         db_path, camera_a, camera_b, person_threshold, vehicle_threshold
@@ -1690,7 +1901,25 @@ def build_unified_identities(
                         best_wc_sim[eb] = s
 
         # Union cross-camera matched pairs, skipping any match
-        # where either entity has a stronger within-camera partner.
+        # where either entity has a stronger within-camera partner
+        # that belongs to a DIFFERENT identity group.  If the strong
+        # partner is already in the same UF group as the candidate,
+        # it shouldn't block — they're the same person.
+        _wc_best_partner: Dict[int, int] = {}
+        for cam_eids in eids_by_cam.values():
+            for i, ea in enumerate(cam_eids):
+                for eb in cam_eids[i + 1 :]:
+                    if _wc_embs[ea] is None or _wc_embs[eb] is None:
+                        continue
+                    tg = abs(_wc_ts.get(ea, 0) - _wc_ts.get(eb, 0))
+                    if tg > 120:
+                        continue
+                    s = float(np.dot(_wc_embs[ea], _wc_embs[eb]))
+                    if s > best_wc_sim.get(ea, 0):
+                        _wc_best_partner[ea] = eb
+                    if s > best_wc_sim.get(eb, 0):
+                        _wc_best_partner[eb] = ea
+
         for m in match_list:
             eid_a = m["entity_a"]["id"]
             eid_b = m["entity_b"]["id"]
@@ -1698,11 +1927,67 @@ def build_unified_identities(
             wc_a = best_wc_sim.get(eid_a, 0)
             wc_b = best_wc_sim.get(eid_b, 0)
             margin = 0.08
-            if wc_a > cross_sim + margin or wc_b > cross_sim + margin:
+            # Only block if the strong within-camera partner is in
+            # a different group — if partner is already merged with
+            # the candidate, it shouldn't prevent cross-camera linking.
+            block = False
+            if wc_a > cross_sim + margin:
+                partner = _wc_best_partner.get(eid_a)
+                if partner is not None and uf.find(partner) != uf.find(eid_a):
+                    # Don't block if the partner would also match
+                    # the cross-camera entity (they're all the same
+                    # person, just not yet merged).
+                    partner_sim = 0.0
+                    if (
+                        _wc_embs.get(partner) is not None
+                        and _wc_embs.get(eid_b) is not None
+                    ):
+                        partner_sim = float(np.dot(_wc_embs[partner], _wc_embs[eid_b]))
+                    if partner_sim < 0.45:
+                        block = True
+            if wc_b > cross_sim + margin:
+                partner = _wc_best_partner.get(eid_b)
+                if partner is not None and uf.find(partner) != uf.find(eid_b):
+                    partner_sim = 0.0
+                    if (
+                        _wc_embs.get(partner) is not None
+                        and _wc_embs.get(eid_a) is not None
+                    ):
+                        partner_sim = float(np.dot(_wc_embs[partner], _wc_embs[eid_a]))
+                    if partner_sim < 0.45:
+                        block = True
+            if block:
                 continue
+            # Time-proximity gate: cross-camera matches over long
+            # gaps need higher similarity.  A person walking between
+            # cameras takes < 2 minutes.
+            if entity_type == "person":
+                ts_a = _wc_ts.get(eid_a, 0)
+                ts_b = _wc_ts.get(eid_b, 0)
+                cross_gap = abs(ts_a - ts_b)
+                if cross_gap > 600 and cross_sim < 0.70:
+                    continue
+                if cross_gap > 120 and cross_sim < 0.55:
+                    continue
             uf.union(eid_a, eid_b)
 
         # Get all entities of this type, filtering out noise (0-duration singletons)
+        vehicle_median_area_by_cam: Dict[str, float] = {}
+        if entity_type == "vehicle":
+            area_by_cam: Dict[str, List[float]] = {}
+            for e in all_entities_dict.values():
+                if e["entity_type"] != "vehicle":
+                    continue
+                dur = (e.get("last_ts") or 0) - (e.get("first_ts") or 0)
+                if dur < 300:
+                    continue
+                w = max(0.0, (e.get("bbox_x2") or 0) - (e.get("bbox_x1") or 0))
+                h = max(0.0, (e.get("bbox_y2") or 0) - (e.get("bbox_y1") or 0))
+                area_by_cam.setdefault(e["camera_label"], []).append(w * h)
+            for cam, vals in area_by_cam.items():
+                if vals:
+                    vehicle_median_area_by_cam[cam] = float(np.median(vals))
+
         type_entities = {}
         for eid, e in all_entities_dict.items():
             if e["entity_type"] != entity_type:
@@ -1715,8 +2000,29 @@ def build_unified_identities(
             dur = (e["last_ts"] or 0) - (e["first_ts"] or 0)
             if dur < 0.1 and entity_type == "person":
                 continue
-            if entity_type == "vehicle" and dur < 300:
+            if entity_type == "vehicle" and dur < 180:
                 continue
+            if entity_type == "vehicle":
+                cam = e["camera_label"]
+                clip_start = cam_clip_start.get(cam, 0)
+                clip_dur = cam_clip_end.get(cam, 0) - clip_start
+                w = max(0.0, (e.get("bbox_x2") or 0) - (e.get("bbox_x1") or 0))
+                h = max(0.0, (e.get("bbox_y2") or 0) - (e.get("bbox_y1") or 0))
+                area = w * h
+                median_area = vehicle_median_area_by_cam.get(cam, 0.0)
+                # Drop tiny late-start fragments that are usually false positives
+                # caused by foreground motion over parked vehicles.
+                # Frame-edge detections (bbox near y=0 or y=frame_max) use a
+                # stricter area threshold because they are often partial/blurry.
+                if clip_dur > 0 and median_area > 0:
+                    late_start = (e.get("first_ts") or 0) > (clip_start + clip_dur * 0.20)
+                    shortish = dur < (clip_dur * 0.80)
+                    y1 = e.get("bbox_y1") or 0
+                    y2 = e.get("bbox_y2") or 0
+                    near_edge = y1 < 50 or y2 > 1030
+                    tiny = area < (median_area * (0.35 if near_edge else 0.10))
+                    if late_start and shortish and tiny:
+                        continue
             if dur < 0.1 and e.get("description", "").startswith("unknown"):
                 continue
             type_entities[eid] = e
@@ -1773,7 +2079,9 @@ def build_unified_identities(
                     eid_j, ej = cam_entities[j]
 
                     if entity_type == "vehicle":
-                        # Stationary vehicles: merge by bbox IoU
+                        # Vehicles: merge by bbox IoU (stationary)
+                        # OR by high embedding similarity + same color
+                        # (handles vehicles that move between sightings)
                         bx_i = (
                             ei.get("bbox_x1", 0),
                             ei.get("bbox_y1", 0),
@@ -1795,7 +2103,115 @@ def build_unified_identities(
                         a_j = (bx_j[2] - bx_j[0]) * (bx_j[3] - bx_j[1])
                         union = a_i + a_j - inter
                         iou = inter / union if union > 0 else 0
-                        if iou > 0.5:
+                        do_merge = False
+                        # Containment: if the smaller bbox sits
+                        # almost entirely inside the larger one,
+                        # they overlap heavily in time, and share
+                        # the same color — duplicate detection.
+                        min_area = min(a_i, a_j)
+                        containment = inter / min_area if min_area > 0 else 0
+                        c_i_early = (ei.get("color") or "").lower()
+                        c_j_early = (ej.get("color") or "").lower()
+                        # Temporal overlap between the two tracks
+                        t_overlap_start = max(
+                            ei.get("first_ts") or 0, ej.get("first_ts") or 0
+                        )
+                        t_overlap_end = min(
+                            ei.get("last_ts") or 0, ej.get("last_ts") or 0
+                        )
+                        t_overlap = max(0.0, t_overlap_end - t_overlap_start)
+                        shorter_dur = min(
+                            (ei.get("last_ts") or 0) - (ei.get("first_ts") or 0),
+                            (ej.get("last_ts") or 0) - (ej.get("first_ts") or 0),
+                        )
+                        t_overlap_frac = (
+                            t_overlap / shorter_dur if shorter_dur > 0 else 0
+                        )
+                        # For non-overlapping tracks with a large
+                        # temporal gap, skip spatial merges — the car
+                        # may have left and returned.  Scale the
+                        # threshold with clip duration so short clips
+                        # catch departures while long clips allow
+                        # natural tracking gaps.
+                        _large_gap = False
+                        if t_overlap == 0:
+                            _g_start = max(
+                                ei.get("first_ts") or 0,
+                                ej.get("first_ts") or 0,
+                            )
+                            _g_end = min(
+                                ei.get("last_ts") or 0,
+                                ej.get("last_ts") or 0,
+                            )
+                            _cam_dur = (
+                                cam_clip_end.get(_cam, 0)
+                                - cam_clip_start.get(_cam, 0)
+                            )
+                            _gap_limit = max(3000, _cam_dur * 0.3)
+                            if _g_start - _g_end > _gap_limit:
+                                _large_gap = True
+                        if iou > 0.5 and not _large_gap:
+                            do_merge = True
+                        elif (
+                            containment > 0.95
+                            and t_overlap_frac > 0.90
+                            and c_i_early == c_j_early
+                            and c_i_early != ""
+                            and max(a_i, a_j) < 500_000
+                        ):
+                            do_merge = True
+                        else:
+                            # Fallback: embedding similarity + color
+                            # Skip if non-overlapping tracks have a large
+                            # temporal gap — the car may have left and
+                            # returned (separate identity events).
+                            _do_emb_merge = True
+                            if t_overlap == 0:
+                                gap_start = max(
+                                    ei.get("first_ts") or 0,
+                                    ej.get("first_ts") or 0,
+                                )
+                                gap_end = min(
+                                    ei.get("last_ts") or 0,
+                                    ej.get("last_ts") or 0,
+                                )
+                                temporal_gap = gap_start - gap_end
+                                if temporal_gap > _gap_limit:
+                                    _do_emb_merge = False
+                            if _do_emb_merge:
+                                e_i = embs.get(eid_i)
+                                e_j = embs.get(eid_j)
+                                if e_i is not None and e_j is not None:
+                                    v_sim = float(np.dot(e_i, e_j))
+                                    c_i = (ei.get("color") or "").lower()
+                                    c_j = (ej.get("color") or "").lower()
+                                    same_color = c_i == c_j and c_i != ""
+                                    cx_i = (bx_i[0] + bx_i[2]) / 2
+                                    cy_i = (bx_i[1] + bx_i[3]) / 2
+                                    cx_j = (bx_j[0] + bx_j[2]) / 2
+                                    cy_j = (bx_j[1] + bx_j[3]) / 2
+                                    cdist = ((cx_i - cx_j) ** 2 + (cy_i - cy_j) ** 2) ** 0.5
+                                    area_ratio = (
+                                        min(a_i, a_j) / max(a_i, a_j)
+                                        if max(a_i, a_j) > 0
+                                        else 0
+                                    )
+                                    if (
+                                        same_color
+                                        and v_sim >= 0.75
+                                        and cdist < 200
+                                        and area_ratio > 0.5
+                                    ):
+                                        do_merge = True
+                                    elif (
+                                        v_sim >= 0.70
+                                        and cdist < 150
+                                        and area_ratio > 0.8
+                                    ):
+                                        do_merge = True
+                                    elif v_sim >= 0.90 and (same_color or cdist < 100):
+                                        do_merge = True
+                        if do_merge:
                             uf.union(eid_i, eid_j)
                     else:
                         # Persons: merge by embedding similarity,
@@ -1814,8 +2230,8 @@ def build_unified_identities(
                             # when the person looks the same.
                             def _color_group(c: str) -> str:
                                 c = c.lower().strip()
-                                if c in ("black", "dark grey", "dark gray"):
-                                    return "dark"
+                                if c in ("dark grey", "dark gray"):
+                                    return "dark_grey"
                                 if c in ("grey", "gray", "light grey"):
                                     return "grey"
                                 if c in ("white", "light"):
@@ -1836,34 +2252,54 @@ def build_unified_identities(
                                 and desc_i[0] != ""
                                 and desc_i[1] != ""
                             )
-                            # Very close (<30s): 0.55 threshold
-                            # Close together (<120s): 0.55 threshold
-                            # Far apart (>300s): 0.85 normally,
-                            #   but 0.62 if same clothing, or 0.70
-                            #   for high-confidence matches
-                            if time_gap <= 30:
+                            # Time-gap scaled thresholds:
+                            #   <=30s:  0.55 (brief occlusion)
+                            #   <=120s: 0.55 (walked off and back)
+                            #   120-600s same clothes: 0.62
+                            #   120-600s diff clothes: 0.65
+                            #   >600s same clothes: 0.68
+                            #   >600s diff clothes: 0.78
+                            if time_gap <= 120:
                                 thresh = 0.55
-                            elif time_gap <= 120:
-                                thresh = 0.55
-                            elif same_clothes:
-                                thresh = 0.68
-                            elif time_gap >= 300:
-                                thresh = 0.80
+                            elif time_gap <= 600:
+                                thresh = 0.62 if same_clothes else 0.78
                             else:
-                                t = (time_gap - 120) / 180.0
-                                thresh = 0.62 + t * 0.23
+                                base = 0.735 if same_clothes else (
+                                    0.79 if time_gap < 300 else 0.80
+                                )
+                                if person_threshold > 0.80:
+                                    # High adaptive threshold (8h/11h).
+                                    # Allow a lower bar for tracks with
+                                    # matching upper colour in a moderate
+                                    # time window — catches residents
+                                    # going in/out while blocking people
+                                    # seen hours apart.
+                                    same_upper = (
+                                        _color_group(desc_i[0])
+                                        == _color_group(desc_j[0])
+                                        and desc_i[0] != ""
+                                    )
+                                    if time_gap < 3000 and same_upper:
+                                        thresh = 0.75
+                                    else:
+                                        thresh = person_threshold
+                                else:
+                                    thresh = base
                             # Cross-camera anchor protection:
-                            # if BOTH entities already have cross-camera
-                            # matches in different groups, require very
-                            # high similarity to prevent false collapse.
-                            # If only one is cross-matched, allow normal
-                            # merging (adds sightings to existing identity).
+                            # if either entity already has a cross-camera
+                            # match and they sit in different UF groups,
+                            # raise the within-camera merge threshold to
+                            # prevent pulling a cross-matched entity into
+                            # the wrong identity cluster.
+                            # Exempt temporally close pairs (<=120s) —
+                            # tracks overlapping or adjacent on the same
+                            # camera are clearly the same person.
                             if (
-                                eid_i in cross_matched
-                                and eid_j in cross_matched
+                                (eid_i in cross_matched or eid_j in cross_matched)
                                 and uf.find(eid_i) != uf.find(eid_j)
+                                and time_gap > 180
                             ):
-                                thresh = max(thresh, 0.85)
+                                thresh = max(thresh, 0.86)
                             if sim >= thresh:
                                 uf.union(eid_i, eid_j)
 
@@ -1960,6 +2396,100 @@ def build_unified_identities(
         return identities
 
     persons = _build_identities_union_find(matches["person_matches"], "person")
+
+    # Post-processing: merge "returning person" identities.
+    # If a cross-camera person departs early in the clip and another
+    # cross-camera person arrives late, they may be the same individual
+    # returning after a clothing change.  Merge when the best
+    # sighting-pair embedding similarity exceeds a threshold.
+    _clip_s = min(cam_clip_start.values()) if cam_clip_start else 0
+    _clip_e = max(cam_clip_end.values()) if cam_clip_end else 0
+    _clip_dur = _clip_e - _clip_s
+    if _clip_dur > 3600:  # only for clips > 1h
+        _early_cut = _clip_s + _clip_dur * 0.20
+        # Use the tighter of percentage-based and absolute cap so
+        # the window works for both 8h and 11h clips.  The absolute
+        # cap (7h from clip start) lets 11h evening returns qualify
+        # without widening the window so much that 8h false-merges.
+        _late_cut = min(
+            _clip_e - _clip_dur * 0.20,
+            _clip_s + 7 * 3600,
+        )
+        _ret_thresh = 0.88
+        _merged_idx: set = set()
+        for i, pi in enumerate(persons):
+            if i in _merged_idx:
+                continue
+            pi_cams = set(s["camera"] for s in pi["sightings"])
+            if len(pi_cams) < 2:
+                continue
+            pi_latest = max(s["last_ts"] for s in pi["sightings"])
+            if pi_latest > _early_cut:
+                continue
+            # Find the BEST matching late person, not just the first
+            best_j = None
+            best_sim = 0.0
+            for j, pj in enumerate(persons):
+                if j <= i or j in _merged_idx:
+                    continue
+                pj_cams = set(s["camera"] for s in pj["sightings"])
+                if len(pj_cams) < 2:
+                    continue
+                pj_earliest = min(s["first_ts"] for s in pj["sightings"])
+                if pj_earliest < _late_cut:
+                    continue
+                # Best embedding sim between any raw sighting pair
+                _best = 0.0
+                for si in pi.get("raw_sightings", []):
+                    ei = all_entities_dict.get(si["entity_id"])
+                    if not ei or not ei.get("embedding"):
+                        continue
+                    _ei = np.frombuffer(ei["embedding"], dtype=np.float32)
+                    _ni = np.linalg.norm(_ei)
+                    if _ni == 0:
+                        continue
+                    _ei = _ei / _ni
+                    for sj in pj.get("raw_sightings", []):
+                        ej = all_entities_dict.get(sj["entity_id"])
+                        if not ej or not ej.get("embedding"):
+                            continue
+                        _ej = np.frombuffer(ej["embedding"], dtype=np.float32)
+                        _nj = np.linalg.norm(_ej)
+                        if _nj == 0:
+                            continue
+                        _ej = _ej / _nj
+                        s = float(np.dot(_ei, _ej))
+                        if s > _best:
+                            _best = s
+                if _best >= _ret_thresh and _best > best_sim:
+                    best_j = j
+                    best_sim = _best
+            if best_j is not None:
+                pj = persons[best_j]
+                pi["sightings"].extend(pj["sightings"])
+                pi["raw_sightings"].extend(
+                    pj.get("raw_sightings", [])
+                )
+                pi["sightings"].sort(key=lambda x: x["first_ts"])
+                pi["raw_sightings"].sort(
+                    key=lambda x: x["first_ts"]
+                )
+                pi["matched"] = True
+                existing_sim = pi.get("similarity")
+                if existing_sim:
+                    pi["similarity"] = max(existing_sim, best_sim)
+                else:
+                    pi["similarity"] = round(best_sim, 3)
+                _merged_idx.add(best_j)
+        if _merged_idx:
+            persons = [
+                p for idx, p in enumerate(persons)
+                if idx not in _merged_idx
+            ]
+            # Re-number unified IDs
+            for idx, p in enumerate(persons, 1):
+                p["unified_id"] = idx
+
     vehicles = _build_identities_union_find(matches["vehicle_matches"], "vehicle")
 
     # Collect short-duration vehicle tracks (filtered by the 300s noise
@@ -2078,7 +2608,26 @@ def link_persons_to_vehicles(
                     }
                 )
             # If near_start AND near_end → stationary whole clip, skip
-            # If neither → brief appearance, skip
+            elif not near_start and not near_end:
+                # Appeared and disappeared mid-clip → visiting vehicle
+                vehicle_events.append(
+                    {
+                        "vehicle": v,
+                        "sighting": s,
+                        "event": "arrival",
+                        "event_ts": s["first_ts"],
+                        "camera": cam,
+                    }
+                )
+                vehicle_events.append(
+                    {
+                        "vehicle": v,
+                        "sighting": s,
+                        "event": "departure",
+                        "event_ts": s["last_ts"],
+                        "camera": cam,
+                    }
+                )
 
     # Brief vehicle tracks (filtered by noise gate) may represent a car
     # briefly appearing as it arrives or departs.  Classify by position
@@ -2092,9 +2641,10 @@ def link_persons_to_vehicles(
         if c_dur <= 0:
             continue
 
-        # Match brief vehicle to a main vehicle by bbox IoU.
-        # A brief detection of a car arriving/departing should overlap
-        # spatially with where that car parks (its main detection).
+        # Match brief vehicle to a main vehicle by bbox IoU + temporal
+        # proximity.  A brief detection must be within 1800s of the
+        # main vehicle's sighting to avoid matching cars that parked
+        # in the same spot hours apart.
         bv_bbox = bv.get("bbox", (0, 0, 0, 0))
         matched_vehicle = None
         best_iou = 0.0
@@ -2102,6 +2652,21 @@ def link_persons_to_vehicles(
             for s in v["sightings"]:
                 if s["camera"] != cam:
                     continue
+                # Temporal proximity: brief detection must be within
+                # 1800s of the main vehicle's time range
+                bv_mid = (bv["first_ts"] + bv["last_ts"]) / 2
+                if (bv_mid < s["first_ts"] - 1800
+                        or bv_mid > s["last_ts"] + 1800):
+                    continue
+                # Skip stationary vehicles (present whole clip)
+                _sv_start = cam_clip_start.get(cam, clip_start)
+                _sv_end = cam_clip_end.get(cam, clip_end)
+                _sv_dur = _sv_end - _sv_start
+                if _sv_dur > 0:
+                    _sv_margin = _sv_dur * 0.05
+                    if ((s["first_ts"] - _sv_start) < _sv_margin
+                            and (_sv_end - s["last_ts"]) < _sv_margin):
+                        continue
                 # Get main vehicle bbox from DB entity
                 eid = s.get("entity_id")
                 if eid and all_entities and eid in all_entities:
@@ -2130,6 +2695,16 @@ def link_persons_to_vehicles(
             continue
 
         if matched_vehicle is None:
+            continue
+
+        # Skip arrival events from vehicles that have been parked
+        # for a long time — a car present for hours is not "arriving".
+        mv_earliest = min(
+            s["first_ts"]
+            for s in matched_vehicle["sightings"]
+            if s["camera"] == cam
+        )
+        if bv["first_ts"] - mv_earliest > 1800:
             continue
 
         # Brief detection mid-clip = arrival event
@@ -2239,7 +2814,74 @@ def link_persons_to_vehicles(
             if best_ps["camera"] == ev_cam:
                 score *= 1.2
 
-            if score >= 0.1:
+            # Temporal ordering: for arrivals the person should appear
+            # AFTER the vehicle; for departures the person should be
+            # seen BEFORE the vehicle leaves.
+            if ev_type == "departure":
+                order_gap = ev_ts - person_ts  # positive = correct
+            else:
+                order_gap = person_ts - ev_ts  # positive = correct
+
+            if order_gap < -120:
+                # Wrong order by >2 min — almost certainly not real
+                score *= 0.05
+            elif order_gap < -30:
+                score *= 0.2
+
+            # "Already present" / "Still around" checks — gap-aware.
+            # A returning person (leaves morning, returns evening)
+            # has sightings spanning the whole day.  Check for
+            # NEARBY sightings that contradict the journey, not the
+            # overall time span.
+            if ev_type == "arrival":
+                # Find latest sighting BEFORE the vehicle event
+                prev_sightings = [
+                    s for s in all_sightings
+                    if s["last_ts"] < ev_ts - 60
+                ]
+                if prev_sightings:
+                    prev_latest = max(
+                        s["last_ts"] for s in prev_sightings
+                    )
+                    if ev_ts - prev_latest < 3600:
+                        # Person was seen <1h before arrival —
+                        # they were already on-site
+                        score *= 0.1
+                    # else: >1h gap means they left and returned
+
+                # Stronger: if person's NEAREST pre-event sighting
+                # is on a different camera and very close in time,
+                # they were already walking around on-site.
+                near_before = [
+                    s for s in all_sightings
+                    if s["first_ts"] < ev_ts
+                    and ev_ts - s["first_ts"] < 300
+                ]
+                if near_before:
+                    first_near = min(
+                        near_before, key=lambda s: s["first_ts"]
+                    )
+                    if (first_near["camera"] != ev_cam
+                            and first_near["first_ts"] < ev_ts - 10):
+                        score *= 0.05
+
+            if ev_type == "departure":
+                # Find earliest sighting AFTER the vehicle event
+                post_sightings = [
+                    s for s in all_sightings
+                    if s["first_ts"] > ev_ts + 60
+                ]
+                if post_sightings:
+                    post_earliest = min(
+                        s["first_ts"] for s in post_sightings
+                    )
+                    if post_earliest - ev_ts < 3600:
+                        # Person reappears <1h after departure —
+                        # they didn't leave in the vehicle
+                        score *= 0.1
+                    # else: >1h gap means they left and came back
+
+            if score >= 0.25:
                 candidates.append(
                     {
                         "person_id": p["unified_id"],
@@ -2275,7 +2917,46 @@ def link_persons_to_vehicles(
         journeys.append(c)
 
     journeys.sort(key=lambda j: j["timestamp"])
-    return journeys
+
+    # Merge same-person departure + arrival into round-trip entries.
+    by_person: Dict[int, List[dict]] = {}
+    for j in journeys:
+        by_person.setdefault(j["person_id"], []).append(j)
+
+    merged: List[dict] = []
+    merged_ids: set = set()
+    for pid, pj_list in by_person.items():
+        deps = [j for j in pj_list if j["event"] == "departure"]
+        arrs = [j for j in pj_list if j["event"] == "arrival"]
+        if deps and arrs:
+            dep = deps[0]
+            arr = arrs[0]
+            merged.append({
+                "person_id": pid,
+                "vehicle_id": arr["vehicle_id"],
+                "event": "round_trip",
+                "vehicle_desc": arr["vehicle_desc"],
+                "person_desc": dep["person_desc"],
+                "timestamp": dep["timestamp"],
+                "person_ts": dep["person_ts"],
+                "gap_seconds": dep["gap_seconds"],
+                "confidence": round(
+                    (dep["confidence"] + arr["confidence"]) / 2, 3
+                ),
+                "camera": dep["camera"],
+                "person_crop": dep.get("person_crop"),
+                "vehicle_crop": arr.get("vehicle_crop"),
+                "departure": dep,
+                "arrival": arr,
+            })
+            merged_ids.add(id(dep))
+            merged_ids.add(id(arr))
+
+    # Keep non-merged journeys, replace merged pairs with round-trip
+    result = [j for j in journeys if id(j) not in merged_ids]
+    result.extend(merged)
+    result.sort(key=lambda j: j["timestamp"])
+    return result
 
 
 def match_vehicle_returns(
