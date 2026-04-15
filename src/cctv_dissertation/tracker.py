@@ -111,29 +111,33 @@ def extract_video_timestamp(video_path: str) -> Optional[str]:
     if not ret:
         return None
 
-    h = frame.shape[0]
-    strip = frame[h - 60 :, :]
+    h, w = frame.shape[:2]
 
     reader = easyocr.Reader(["en"], gpu=False, verbose=False)
-    results = reader.readtext(strip)
-    full_text = " ".join(t for _, t, _ in results)
 
-    # Normalise common OCR noise
-    full_text = re.sub(r"(\d)\s*:\s*(\d)", r"\1:\2", full_text)
-    full_text = re.sub(r"(\d)\s*-\s*(\d)", r"\1-\2", full_text)
-    full_text = full_text.replace("_", "-")  # underscore → dash
-    full_text = re.sub(r"(\d),(\d)", r"\1 \2", full_text)  # comma → space
+    # Try multiple strip heights — DVR overlays vary in position.
+    # Also try the right half (timestamp is usually bottom-right).
+    for strip_h in [80, 60, 100, 120]:
+        for crop in [frame[h - strip_h :, :], frame[h - strip_h :, w // 2 :]]:
+            results = reader.readtext(crop)
+            full_text = " ".join(t for _, t, _ in results)
 
-    # Strip one spurious inserted digit from 5-char year lookalikes
-    # e.g. "20026" → "2026": keep first digit + last 3, drop the noise digit
-    full_text = re.sub(r"\b([12])\d(\d{3})\b", r"\1\2", full_text)
+            # Normalise common OCR noise
+            full_text = re.sub(r"(\d)\s*:\s*(\d)", r"\1:\2", full_text)
+            full_text = re.sub(r"(\d)\s*-\s*(\d)", r"\1-\2", full_text)
+            full_text = full_text.replace("_", "-")  # underscore → dash
+            full_text = re.sub(r"(\d),(\d)", r"\1 \2", full_text)  # comma → space
 
-    m = re.search(
-        r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})",
-        full_text,
-    )
-    if m:
-        return f"{m.group(1)} {m.group(2)}"
+            # Strip one spurious inserted digit from 5-char year lookalikes
+            # e.g. "20026" → "2026": keep first digit + last 3, drop the noise digit
+            full_text = re.sub(r"\b([12])\d(\d{3})\b", r"\1\2", full_text)
+
+            m = re.search(
+                r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})",
+                full_text,
+            )
+            if m:
+                return f"{m.group(1)} {m.group(2)}"
     return None
 
 
@@ -313,7 +317,7 @@ class SingleCameraTracker:
         if self.plate_model is None or crop.size == 0:
             return None, 0.0, None
 
-        results = self.plate_model.predict(crop, conf=conf, imgsz=640, verbose=False)
+        results = self.plate_model.predict(crop, conf=conf, imgsz=1280, verbose=False)
         best_box, best_conf = None, 0.0
         for r in results:
             for b in r.boxes:
@@ -328,22 +332,72 @@ class SingleCameraTracker:
         ocr_text = None
         if best_box and self.ocr_reader:
             px1, py1, px2, py2 = best_box
+            pad = 10
             plate_crop = crop[
-                max(0, py1 - 5) : min(crop.shape[0], py2 + 5),
-                max(0, px1 - 5) : min(crop.shape[1], px2 + 5),
+                max(0, py1 - pad) : min(crop.shape[0], py2 + pad),
+                max(0, px1 - pad) : min(crop.shape[1], px2 + pad),
             ]
             if plate_crop.size > 0:
                 try:
+                    # Upscale plates for better OCR — EasyOCR works
+                    # best with character heights around 30-50px.
+                    h_pc, w_pc = plate_crop.shape[:2]
+                    if h_pc < 120:
+                        scale = max(2, 120 // h_pc)
+                        plate_crop = cv2.resize(
+                            plate_crop,
+                            (w_pc * scale, h_pc * scale),
+                            interpolation=cv2.INTER_CUBIC,
+                        )
+                    # Try both colour and sharpened grayscale, pick best
                     gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
-                    gray = cv2.equalizeHist(gray)
-                    ocr_results = self.ocr_reader.readtext(gray)
-                    texts = []
-                    for _, text, c in ocr_results:
-                        cleaned = "".join(ch for ch in text if ch.isalnum()).upper()
-                        if cleaned and c > 0.3:
-                            texts.append(cleaned)
-                    if texts:
-                        ocr_text = " ".join(texts)
+                    kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+                    sharp = cv2.filter2D(gray, -1, kernel)
+                    best_ocr_text = None
+                    best_ocr_conf = 0.0
+                    for ocr_img in (plate_crop, sharp):
+                        ocr_results = self.ocr_reader.readtext(
+                            ocr_img,
+                            allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                        )
+                        ocr_results.sort(key=lambda r: r[0][0][0])
+                        texts = []
+                        avg_conf = 0.0
+                        for _, text, c in ocr_results:
+                            cleaned = "".join(
+                                ch for ch in text if ch.isalnum()
+                            ).upper()
+                            if cleaned and c > 0.2:
+                                texts.append(cleaned)
+                                avg_conf += c
+                        if texts:
+                            avg_conf /= len(texts)
+                            candidate = " ".join(texts)
+                            if avg_conf > best_ocr_conf:
+                                best_ocr_conf = avg_conf
+                                best_ocr_text = candidate
+                    # Post-process: strip leading/trailing noise chars
+                    # and try to match UK plate format (XX99 XXX)
+                    if best_ocr_text:
+                        import re
+
+                        raw = re.sub(r"[^A-Z0-9]", "", best_ocr_text)
+                        # UK format: 2 letters, 2 digits, 3 letters = 7 chars
+                        uk = re.search(r"([A-Z]{2}\d{2}[A-Z]{3})", raw)
+                        if uk:
+                            m = uk.group(1)
+                            best_ocr_text = f"{m[:4]} {m[4:]}"
+                        elif len(raw) > 7:
+                            # Trim to 7 most likely chars from the right
+                            # (leading noise is most common)
+                            raw = raw[-7:]
+                            uk2 = re.match(
+                                r"([A-Z]{2}\d{2}[A-Z]{3})", raw
+                            )
+                            if uk2:
+                                m = uk2.group(1)
+                                best_ocr_text = f"{m[:4]} {m[4:]}"
+                    ocr_text = best_ocr_text
                 except Exception:
                     pass
 
@@ -432,6 +486,21 @@ class SingleCameraTracker:
                 / "bytetrack.yaml"
             )
 
+        # OCR the burned-in DVR timestamp from the first frame so that
+        # all timestamps are in real clock time (epoch seconds) rather
+        # than seconds-from-video-start.  This is critical for cross-camera
+        # matching — the two cameras may start at different wall-clock times.
+        ts_offset = 0.0
+        dvr_ts_str = extract_video_timestamp(str(video_path))
+        if dvr_ts_str:
+            from datetime import datetime as _dt
+            try:
+                dvr_dt = _dt.strptime(dvr_ts_str, "%Y-%m-%d %H:%M:%S")
+                ts_offset = dvr_dt.timestamp()
+                print(f"  DVR timestamp detected: {dvr_ts_str} (offset={ts_offset:.0f})")
+            except ValueError:
+                pass
+
         # Motion detection setup
         prev_gray = None
         frames_skipped = 0
@@ -497,7 +566,7 @@ class SingleCameraTracker:
                         conf = float(boxes.conf[i])
                         x1, y1, x2, y2 = [int(v) for v in boxes.xyxy[i].cpu().numpy()]
                         area = (x2 - x1) * (y2 - y1)
-                        ts = frame_idx / fps
+                        ts = frame_idx / fps + ts_offset
 
                         det = {
                             "frame_idx": frame_idx,
@@ -1275,8 +1344,38 @@ class SingleCameraTracker:
             vtype = VEHICLE_CLASSES.get(best["cls_id"], "car")
             vdesc = describe_vehicle(crop, vehicle_type=vtype)
 
-            # Plate detection on the best crop
-            plate_box, plate_c, plate_text = self._detect_plate(crop, conf=plate_conf)
+            # Plate detection — try multiple frames on the full image
+            # (better for overhead cameras where the plate is small),
+            # only accept if plate bbox overlaps the vehicle bbox.
+            plate_box, plate_c, plate_text = None, 0.0, None
+            vx1, vy1, vx2, vy2 = best["bbox"]
+            # Sample up to 5 frames spread across the track, force-reading
+            # them from video if not already in cache.
+            plate_sample_frames = sorted_dets[:: max(1, len(sorted_dets) // 5)]
+            best_plate_len = 0
+            for pd in plate_sample_frames:
+                pf = self._get_frame(pd["frame_idx"], frame_cache, video_path)
+                if pf is None:
+                    # Force-read from video
+                    cap_tmp = cv2.VideoCapture(video_path)
+                    cap_tmp.set(cv2.CAP_PROP_POS_FRAMES, pd["frame_idx"])
+                    ret_tmp, pf = cap_tmp.read()
+                    cap_tmp.release()
+                    if not ret_tmp:
+                        continue
+                fb, fc, ft = self._detect_plate(pf, conf=plate_conf)
+                if fb and ft:
+                    pcx = (fb[0] + fb[2]) / 2
+                    pcy = (fb[1] + fb[3]) / 2
+                    margin = 40
+                    if (vx1 - margin <= pcx <= vx2 + margin
+                            and vy1 - margin <= pcy <= vy2 + margin):
+                        clean = "".join(c for c in ft if c.isalnum())
+                        if len(clean) > best_plate_len:
+                            best_plate_len = len(clean)
+                            plate_box, plate_c, plate_text = fb, fc, ft
+            if plate_text is None:
+                plate_box, plate_c, plate_text = self._detect_plate(crop, conf=plate_conf)
 
             embedding = self.extract_features(crop)
 
@@ -2316,7 +2415,7 @@ def build_unified_identities(
             _clip_e - _clip_dur * 0.20,
             _clip_s + 7 * 3600,
         )
-        _ret_thresh = 0.70
+        _ret_thresh = 0.88
         _merged_idx: set = set()
         for i, pi in enumerate(persons):
             if i in _merged_idx:
@@ -2327,6 +2426,9 @@ def build_unified_identities(
             pi_latest = max(s["last_ts"] for s in pi["sightings"])
             if pi_latest > _early_cut:
                 continue
+            # Find the BEST matching late person, not just the first
+            best_j = None
+            best_sim = 0.0
             for j, pj in enumerate(persons):
                 if j <= i or j in _merged_idx:
                     continue
@@ -2359,24 +2461,26 @@ def build_unified_identities(
                         s = float(np.dot(_ei, _ej))
                         if s > _best:
                             _best = s
-                if _best >= _ret_thresh:
-                    pi["sightings"].extend(pj["sightings"])
-                    pi["raw_sightings"].extend(
-                        pj.get("raw_sightings", [])
-                    )
-                    pi["sightings"].sort(key=lambda x: x["first_ts"])
-                    pi["raw_sightings"].sort(
-                        key=lambda x: x["first_ts"]
-                    )
-                    pi["matched"] = True
-                    # Store returning-person re-ID similarity
-                    existing_sim = pi.get("similarity")
-                    if existing_sim:
-                        pi["similarity"] = max(existing_sim, _best)
-                    else:
-                        pi["similarity"] = round(_best, 3)
-                    _merged_idx.add(j)
-                    break  # one returning match per person
+                if _best >= _ret_thresh and _best > best_sim:
+                    best_j = j
+                    best_sim = _best
+            if best_j is not None:
+                pj = persons[best_j]
+                pi["sightings"].extend(pj["sightings"])
+                pi["raw_sightings"].extend(
+                    pj.get("raw_sightings", [])
+                )
+                pi["sightings"].sort(key=lambda x: x["first_ts"])
+                pi["raw_sightings"].sort(
+                    key=lambda x: x["first_ts"]
+                )
+                pi["matched"] = True
+                existing_sim = pi.get("similarity")
+                if existing_sim:
+                    pi["similarity"] = max(existing_sim, best_sim)
+                else:
+                    pi["similarity"] = round(best_sim, 3)
+                _merged_idx.add(best_j)
         if _merged_idx:
             persons = [
                 p for idx, p in enumerate(persons)
