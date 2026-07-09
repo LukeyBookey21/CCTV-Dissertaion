@@ -317,11 +317,13 @@ def verify_video_integrity(
     # Compute current hash
     current_hash = sha256_hash_file(str(source))
 
-    # Search manifest for matching entry by path or hash
+    # Search manifest for matching entry by path or hash.
+    # Newest entries win: a legitimately re-ingested file should be
+    # verified against its most recent chain-of-custody record.
     entries = load_manifest(manifest)
     stored_entry = None
 
-    for entry in entries:
+    for entry in reversed(entries):
         entry_path = Path(entry.get("source_path", "")).resolve()
         entry_hash = entry.get("sha256")
 

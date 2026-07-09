@@ -6,7 +6,10 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from ultralytics import YOLO
+try:  # heavy optional dependency; only needed to run detections
+    from ultralytics import YOLO
+except ImportError:  # pragma: no cover - exercised via monkeypatched tests
+    YOLO = None  # type: ignore[assignment]
 
 from .ingest import extract_video_metadata
 from .utils.hashing import sha256_hash_file
@@ -24,6 +27,11 @@ def run_yolo_detection(
     max_frames: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run YOLOv8 on `video_path` and return structured detections."""
+    if YOLO is None:
+        raise RuntimeError(
+            "ultralytics is not installed; run `pip install ultralytics` "
+            "to enable YOLO detection"
+        )
     source = Path(video_path).expanduser().resolve()
     if not source.exists():
         raise FileNotFoundError(f"Video not found: {source}")
@@ -74,13 +82,12 @@ def write_detection_report(
     output_path: str | Path | None = None,
 ) -> Path:
     """Persist detection `report` as JSON and return the path."""
-    output_dir = DEFAULT_DETECTIONS_DIR
-    output_dir.mkdir(parents=True, exist_ok=True)
     target = (
         Path(output_path).expanduser().resolve()
         if output_path
-        else output_dir / f"{report['sha256']}.json"
+        else DEFAULT_DETECTIONS_DIR / f"{report['sha256']}.json"
     )
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(report, indent=2))
     return target
 

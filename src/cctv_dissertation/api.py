@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Optional
 
@@ -86,7 +85,12 @@ async def upload_video(
 ):
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     DETECTIONS_DIR.mkdir(parents=True, exist_ok=True)
-    target = UPLOADS_DIR / file.filename
+    # Keep only the basename — a crafted filename like "../../x.mp4"
+    # must not escape the uploads directory.
+    safe_name = Path(file.filename or "").name
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Missing filename")
+    target = UPLOADS_DIR / safe_name
     data = await file.read()
     target.write_bytes(data)
 

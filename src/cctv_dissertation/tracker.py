@@ -92,6 +92,21 @@ def calc_auto_stride(video_path: str, target_minutes: int = 15) -> int:
     return max(1, stride)
 
 
+_OCR_READER = None
+
+
+def _get_ocr_reader():
+    """Return a cached easyocr Reader (model load is expensive)."""
+    global _OCR_READER
+    if _OCR_READER is None:
+        try:
+            import easyocr
+        except ImportError:
+            return None
+        _OCR_READER = easyocr.Reader(["en"], gpu=False, verbose=False)
+    return _OCR_READER
+
+
 def extract_video_timestamp(video_path: str) -> Optional[str]:
     """Read the first frame of a video and OCR the burned-in timestamp.
 
@@ -100,9 +115,8 @@ def extract_video_timestamp(video_path: str) -> Optional[str]:
     """
     import re
 
-    try:
-        import easyocr
-    except ImportError:
+    reader = _get_ocr_reader()
+    if reader is None:
         return None
 
     vid = cv2.VideoCapture(video_path)
@@ -114,7 +128,6 @@ def extract_video_timestamp(video_path: str) -> Optional[str]:
     h = frame.shape[0]
     strip = frame[h - 60 :, :]
 
-    reader = easyocr.Reader(["en"], gpu=False, verbose=False)
     results = reader.readtext(strip)
     full_text = " ".join(t for _, t, _ in results)
 
@@ -228,7 +241,9 @@ class SingleCameraTracker:
         self._use_torchreid = False
 
     def _init_database(self):
-        conn = sqlite3.connect(self.db_path)
+        # Generous timeout: two cameras can be processed in parallel
+        # threads writing to the same database file.
+        conn = sqlite3.connect(self.db_path, timeout=30)
         c = conn.cursor()
         c.execute(
             """
@@ -418,7 +433,7 @@ class SingleCameraTracker:
         # Choose ByteTrack config: stride>1 needs lower match_thresh so a
         # walking person whose bbox doesn't overlap between sampled frames
         # still gets assigned to the same track.
-        _stride_cfg = Path(__file__).parents[3] / "models" / "bytetrack_stride.yaml"
+        _stride_cfg = Path(__file__).parents[2] / "models" / "bytetrack_stride.yaml"
         if frame_stride > 1 and _stride_cfg.exists():
             self._tracker_cfg = str(_stride_cfg)
         else:
@@ -1329,7 +1344,7 @@ class SingleCameraTracker:
         camera_label: str,
         run_id: Optional[str] = None,
     ):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         c = conn.cursor()
 
         for entity in persons + vehicles:
@@ -2127,9 +2142,6 @@ def link_persons_to_vehicles(
                         matched_vehicle = v
 
         if matched_vehicle is None or best_iou < 0.15:
-            continue
-
-        if matched_vehicle is None:
             continue
 
         # Brief detection mid-clip = arrival event

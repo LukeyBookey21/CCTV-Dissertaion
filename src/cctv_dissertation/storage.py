@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 DEFAULT_DB_PATH = Path("data/analysis.db")
 
@@ -110,7 +111,7 @@ def import_detection_report(
         raise ValueError("Detection report missing 'sha256'")
 
     frames = report.get("detections", [])
-    with get_connection(db_path) as conn:
+    with closing(get_connection(db_path)) as conn, conn:
         conn.execute(
             """
             INSERT INTO videos (sha256, source_path, model_path, confidence_threshold,
@@ -161,8 +162,9 @@ def import_detection_report(
 
         conn.executemany(
             """
-            INSERT INTO frames (video_sha, frame_index, timestamp_seconds, detections_count)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO frames (
+                video_sha, frame_index, timestamp_seconds, detections_count
+            ) VALUES (?, ?, ?, ?)
             """,
             frame_rows,
         )
@@ -218,7 +220,7 @@ def query_detections(
             params.append(end)
     sql.append("ORDER BY f.timestamp_seconds ASC")
 
-    with get_connection(db_path) as conn:
+    with closing(get_connection(db_path)) as conn:
         rows = conn.execute(" ".join(sql), params).fetchall()
 
     return [
@@ -239,8 +241,12 @@ def store_tracks(
     tracks: Sequence[Dict[str, Any]],
     db_path: str | Path | None = None,
 ) -> None:
-    with get_connection(db_path) as conn:
-        conn.execute("DELETE FROM track_points WHERE track_id IN (SELECT id FROM tracks WHERE video_sha = ?)", (sha256,))
+    with closing(get_connection(db_path)) as conn, conn:
+        conn.execute(
+            "DELETE FROM track_points WHERE track_id IN "
+            "(SELECT id FROM tracks WHERE video_sha = ?)",
+            (sha256,),
+        )
         conn.execute("DELETE FROM tracks WHERE video_sha = ?", (sha256,))
         for track in tracks:
             cursor = conn.execute(
@@ -291,13 +297,17 @@ def query_tracks(
     db_path: str | Path | None = None,
     class_name: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    sql = ["SELECT id, track_label, class_name, start_frame, end_frame, start_time, end_time, detections_count FROM tracks WHERE video_sha = ?"]
+    sql = [
+        "SELECT id, track_label, class_name, start_frame, end_frame,"
+        " start_time, end_time, detections_count"
+        " FROM tracks WHERE video_sha = ?"
+    ]
     params: List[Any] = [sha256]
     if class_name:
         sql.append("AND class_name = ?")
         params.append(class_name)
     sql.append("ORDER BY start_time ASC")
-    with get_connection(db_path) as conn:
+    with closing(get_connection(db_path)) as conn:
         rows = conn.execute(" ".join(sql), params).fetchall()
         track_ids = [row[0] for row in rows]
         points_map = {}
@@ -305,7 +315,8 @@ def query_tracks(
             placeholders = ",".join(["?"] * len(track_ids))
             point_rows = conn.execute(
                 f"""
-                SELECT track_id, frame_index, timestamp_seconds, confidence, x1, y1, x2, y2
+                SELECT track_id, frame_index, timestamp_seconds,
+                       confidence, x1, y1, x2, y2
                 FROM track_points
                 WHERE track_id IN ({placeholders})
                 ORDER BY timestamp_seconds ASC

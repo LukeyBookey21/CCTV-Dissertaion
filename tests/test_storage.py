@@ -80,8 +80,18 @@ def test_import_and_query(tmp_path):
             "start_time": 0.0,
             "end_time": 0.2,
             "detections": [
-                {"frame_index": 0, "timestamp_seconds": 0.0, "confidence": 0.8, "bbox_xyxy": [0, 0, 1, 1]},
-                {"frame_index": 2, "timestamp_seconds": 0.2, "confidence": 0.7, "bbox_xyxy": [0, 0, 1, 1]},
+                {
+                    "frame_index": 0,
+                    "timestamp_seconds": 0.0,
+                    "confidence": 0.8,
+                    "bbox_xyxy": [0, 0, 1, 1],
+                },
+                {
+                    "frame_index": 2,
+                    "timestamp_seconds": 0.2,
+                    "confidence": 0.7,
+                    "bbox_xyxy": [0, 0, 1, 1],
+                },
             ],
         }
     ]
