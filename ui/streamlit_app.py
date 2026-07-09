@@ -29,9 +29,10 @@ from cctv_dissertation.storage import (  # noqa: E402
     query_tracks,
 )
 
-DETECTIONS_DIR = Path("data/detections")
-UPLOADS_DIR = Path("data/uploads")
-PREVIEWS_DIR = Path("data/previews")
+# Anchor all data paths to the project root so the app works no matter
+# which directory `streamlit run` is launched from.
+DETECTIONS_DIR = PROJECT_ROOT / "data" / "detections"
+UPLOADS_DIR = PROJECT_ROOT / "data" / "uploads"
 TRACKER_DB = PROJECT_ROOT / "data" / "tracker.db"
 TRACKED_OUTPUT = PROJECT_ROOT / "data" / "tracked_output"
 CLIPS_DIR = PROJECT_ROOT / "data" / "clips"
@@ -243,11 +244,16 @@ def page_single_tracking(camera: str) -> None:
     # Show frame-by-frame viewer from the source video
     if entities:
         video_path = entities[0].get("video_path", "")
-        if Path(video_path).exists():
+        if not Path(video_path).exists():
+            st.warning("Source video file not found on disk.")
+        else:
             cap = cv2.VideoCapture(video_path)
             total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
             cap.release()
+            if total <= 0 or fps <= 0:
+                st.warning("Could not read frames from the source video.")
+                return
 
             ts = st.slider(
                 "Scrub through video",
@@ -401,6 +407,8 @@ def page_cross_dual_view(cam_a: str, cam_b: str) -> None:
 
     if not Path(video_a).exists() or not Path(video_b).exists():
         st.warning("Source video files not found.")
+        st.divider()
+        _show_cross_matches_summary(cam_a, cam_b)
         return
 
     cap_a = cv2.VideoCapture(video_a)
@@ -411,6 +419,12 @@ def page_cross_dual_view(cam_a: str, cam_b: str) -> None:
     total_b = int(cap_b.get(cv2.CAP_PROP_FRAME_COUNT))
     cap_a.release()
     cap_b.release()
+
+    if total_a <= 0 or total_b <= 0:
+        st.warning("Could not read frames from one of the source videos.")
+        st.divider()
+        _show_cross_matches_summary(cam_a, cam_b)
+        return
 
     max_dur = max(total_a / fps_a, total_b / fps_b)
 
@@ -1436,6 +1450,27 @@ def page_search(cameras: List[str]) -> None:
             )
 
 
+@st.cache_resource(show_spinner="Loading Re-ID model...")
+def _get_person_reid():
+    """Load the person Re-ID model once per session (it is expensive)."""
+    from cctv_dissertation.person_reid import PersonReID
+
+    return PersonReID(
+        db_path=str(PROJECT_ROOT / "data" / "person_reid.db"),
+        device="cpu",
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _reference_embedding(image_bytes: bytes) -> Optional[np.ndarray]:
+    """Extract (and cache) the Re-ID embedding for an uploaded photo."""
+    file_bytes = np.frombuffer(image_bytes, dtype=np.uint8)
+    ref_img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if ref_img is None:
+        return None
+    return _get_person_reid().extract_features(ref_img)
+
+
 def page_person_of_interest(cameras: Optional[List[str]] = None) -> None:
     """Upload a reference photo to find matching persons across cameras."""
     st.header("Person of Interest")
@@ -1464,7 +1499,8 @@ def page_person_of_interest(cameras: Optional[List[str]] = None) -> None:
         return
 
     # Display the reference image
-    file_bytes = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
+    image_bytes = uploaded.read()
+    file_bytes = np.frombuffer(image_bytes, dtype=np.uint8)
     ref_img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
     if ref_img is None:
         st.error("Could not read the uploaded image.")
@@ -1478,15 +1514,13 @@ def page_person_of_interest(cameras: Optional[List[str]] = None) -> None:
             use_container_width=True,
         )
 
-    # Extract embedding from reference photo
+    # Extract embedding from reference photo (cached across reruns so
+    # moving the sensitivity slider doesn't re-run the model).
     with st.spinner("Extracting features..."):
-        from cctv_dissertation.person_reid import PersonReID
-
-        reid = PersonReID(
-            db_path=str(PROJECT_ROOT / "data" / "person_reid.db"),
-            device="cpu",
-        )
-        query_emb = reid.extract_features(ref_img)
+        query_emb = _reference_embedding(image_bytes)
+    if query_emb is None:
+        st.error("Could not extract features from the uploaded image.")
+        return
 
     # Compare against all person entities in DB
     if not TRACKER_DB.exists():
@@ -1568,7 +1602,6 @@ def _generate_forensic_pdf(
     video_path_b: Optional[str] = None,
 ) -> bytes:
     """Generate comprehensive forensic PDF with full audit trail and metadata."""
-    import hashlib
     from datetime import datetime
 
     from fpdf import FPDF
@@ -2722,12 +2755,22 @@ def page_evidence_export(cam_a: str, cam_b: str) -> None:
 
             zip_bytes = build_evidence_package(config)
 
+        from datetime import date
+
+        stamp = (
+            st.session_state.get(f"start_date_{cam_a}") or date.today().isoformat()
+        ).replace("-", "")
+        # Stash in session state so the download button survives reruns
+        st.session_state["evidence_zip"] = zip_bytes
+        st.session_state["evidence_zip_name"] = f"evidence_package_{stamp}.zip"
+
+    if st.session_state.get("evidence_zip"):
+        zip_bytes = st.session_state["evidence_zip"]
         st.success(f"Package ready ({len(zip_bytes) / 1024:.0f} KB)")
-        timestamp = st.session_state.get(f"start_date_{cam_a}", "").replace("-", "")
         st.download_button(
             label="Download Evidence Package (ZIP)",
             data=zip_bytes,
-            file_name=f"evidence_package_{timestamp}.zip",
+            file_name=st.session_state["evidence_zip_name"],
             mime="application/zip",
             type="primary",
         )
@@ -3256,6 +3299,7 @@ def handle_cross_upload(file_a, file_b) -> None:
 def main() -> None:
     st.set_page_config(
         page_title="Forensic Video Toolkit",
+        page_icon="🎥",
         layout="wide",
     )
     st.title("Forensic Video Analysis Dashboard")
@@ -3480,6 +3524,16 @@ def main() -> None:
                 page_detections(selected_det, str(DEFAULT_DB_PATH))
         else:
             st.info("Upload a video using the sidebar to begin analysis.")
+            st.markdown(
+                "**Getting started**\n\n"
+                "1. Choose *Single Camera* or *Cross-Camera* mode in the "
+                "sidebar.\n"
+                "2. Upload CCTV footage (MP4, AVI, MOV or MKV).\n"
+                "3. Processing runs detection, tracking, Re-ID and tamper "
+                "checks automatically.\n"
+                "4. Explore the tracking views, search by appearance, and "
+                "export a court-ready evidence package."
+            )
 
 
 if __name__ == "__main__":
