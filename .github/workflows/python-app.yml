@@ -12,15 +12,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install dependencies and package
+          cache: 'pip'
+      - name: Install test dependencies
+        # The tested modules (ingest, detection report I/O, tracking,
+        # analysis, storage, hashing) only need numpy + OpenCV; the heavy
+        # runtime deps (torch, ultralytics, easyocr) are stubbed in tests.
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt || true
+          pip install numpy opencv-python-headless
           pip install -r requirements-dev.txt
-          # Install the package into the environment (editable)
           pip install -e .
+      - name: Lint
+        run: flake8 src tests ui scripts
       - name: Run tests
         run: pytest -q
